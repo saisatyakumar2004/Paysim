@@ -23,8 +23,13 @@
 * The **fuzzy matching join** is the expensive step (merchant x amount x date window x edit distance). It is blocked on merchant and date,
   so it partitions naturally; in a warehouse it should be its own incremental model over only unmatched, recent items.
 * Reconciliation is already **incremental** locally (change-log driven, sticky links, audit table). In a warehouse the change log would
-  be a table stream or `MERGE` output, and Silver would be partitioned by date so the remaining full-table scans become bounded
-  look-backs (SLA plus late-arrival window). That partitioning is the next step and is **not implemented**.
+  be a table stream or `MERGE` output.
+* **Bounding scans (NOT implemented, NOT measured):** locally the incremental compute still scans whole Silver tables and grows with
+  history (0.41 s at 86k items to 8.76 s at 8.6 M). I tested **date-partitioned Parquet** for Silver on this machine and it made the
+  engine 1.4x to 7.1x *slower*, because the engine looks records up by key, so partition pruning never applies ([benchmarks.md](benchmarks.md)).
+  The untested idea is to give recent-scope lookups a date bound (min/max zone maps or clustering on the date column) with an
+  unbounded fallback for late arrivals. Whether clustering helps in Snowflake, BigQuery or Redshift is a question for that platform's
+  own benchmark; nothing measured locally transfers to it.
 * **Secrets, IAM, encryption at rest, PII handling:** none of this exists locally. Payments data carries account-level risk; a real
   deployment needs a data-classification review, tokenised identifiers and column-level access before anything else.
 * **Exactly-once ingestion** would rely on idempotent keys (`txn_id`, `settlement_id`) plus a load ledger, as it does locally.

@@ -114,3 +114,30 @@ Measured before this pass and left untouched; see `results_reconciliation_benchm
 
 **Reading:** incremental evaluates far fewer items, but wall-clock gain over an in-process full rebuild is modest (1.6x at 90 days) and end-to-end daily runtime is dominated by dbt (~9 s of a ~13 s day). Experiment 1 shows why incremental *compute* still grows with history: statements scan whole Silver tables.
 
+## Experiment 3: per-stage time and memory of the real pipeline
+
+Source: `results_stage_resources_30day_backfill.json` (30 pipeline runs, 2026-01-01 to 2026-01-30, synthetic data, seed 42).
+
+| Stage | Runs | Median time | Max time | Median peak RSS | Max peak RSS | Rows in (median) | Rows out (median) | Rejected (median) |
+|---|---|---|---|---|---|---|---|---|
+| ingestion (extract + Bronze) | 30 | 0.26 s | 0.31 s | 163 MB | 170 MB | 12,284 | 12,284 | n/a |
+| data quality (rules, gate) | 30 | 0.37 s | 0.43 s | 165 MB | 172 MB | 12,284 | 12,135 | 144 |
+| Silver (upserts) | 30 | 0.32 s | 0.45 s | 201 MB | 213 MB | n/a | 8,985 | n/a |
+| reconciliation (incremental) | 30 | 0.45 s | 0.55 s | 246 MB | 265 MB | 6,000 | 5,816 | n/a |
+| dbt (marts + tests) | 30 | 10.98 s | 12.21 s | 357 MB | 380 MB | n/a | n/a | n/a |
+
+Dashboard first render (Streamlit AppTest, executive page): first render 6.4 s, cached re-render 0.3 s, peak RSS 238 MB (in-process AppTest; a real browser session adds the browser's own memory, which is NOT MEASURED)
+
+## Experiment 4: local gateway API vs file source
+
+Source: `results_api_2026-09-26.json` (2026-09-26T01:17:02; FastAPI 0.141.1, uvicorn 0.54.0, httpx 0.28.1). localhost HTTP, single client, synthetic data, one machine; this measures the stand-in API, not any real gateway.
+
+| Page size | Records (10 days) | Requests per day | HTTP median per day | Files median per day | Identical to file source |
+|---|---|---|---|---|---|
+| 100 | 31,058 | 31.6 | 62 ms | 17 ms | True |
+| 500 | 31,058 | 6.6 | 31 ms | 18 ms | True |
+| 2000 | 31,058 | 2.0 | 24 ms | 17 ms | True |
+
+* **Retry with backoff:** two injected HTTP 503s, then success: 3,106 records in 0.67 s (expected backoff 0.2 + 0.4 s). Attempts logged: 2026-01-01 page 1 attempt 1: HTTP 503; 2026-01-01 page 1 attempt 2: HTTP 503.
+* **Timeout:** client timeout 0.15 s against a server delaying 0.6 s: IngestError: gateway API failed after 3 attempts for 2026-01-01 page 1 (ReadTimeout) after 3 attempts in 1.11 s.
+

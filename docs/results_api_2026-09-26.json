@@ -1,0 +1,54 @@
+{
+  "run_at": "2026-09-26T01:17:02",
+  "python": "3.12.10",
+  "fastapi": "0.141.1",
+  "uvicorn": "0.54.0",
+  "httpx": "0.28.1",
+  "days_measured": 10,
+  "note": "localhost HTTP, single client, synthetic data, one machine; this measures the stand-in API, not any real gateway",
+  "fetch": [
+    {
+      "page_size": 100,
+      "days": 10,
+      "records": 31058,
+      "http_median_s_per_day": 0.0619,
+      "file_median_s_per_day": 0.0174,
+      "http_requests_per_day": 31.6,
+      "identical_to_file_source": true
+    },
+    {
+      "page_size": 500,
+      "days": 10,
+      "records": 31058,
+      "http_median_s_per_day": 0.0308,
+      "file_median_s_per_day": 0.0185,
+      "http_requests_per_day": 6.6,
+      "identical_to_file_source": true
+    },
+    {
+      "page_size": 2000,
+      "days": 10,
+      "records": 31058,
+      "http_median_s_per_day": 0.0241,
+      "file_median_s_per_day": 0.0174,
+      "http_requests_per_day": 2.0,
+      "identical_to_file_source": true
+    }
+  ],
+  "retry_after_two_503": {
+    "records": 3106,
+    "seconds": 0.67,
+    "attempt_log": [
+      "2026-01-01 page 1 attempt 1: HTTP 503",
+      "2026-01-01 page 1 attempt 2: HTTP 503"
+    ],
+    "expected_backoff_seconds": "0.2 + 0.4"
+  },
+  "timeout_vs_slow_server": {
+    "client_timeout_s": 0.15,
+    "server_delay_s": 0.6,
+    "outcome": "IngestError: gateway API failed after 3 attempts for 2026-01-01 page 1 (ReadTimeout)",
+    "attempts": 3,
+    "seconds_until_giving_up": 1.11
+  }
+}

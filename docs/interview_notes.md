@@ -1,143 +1,152 @@
-# Interview notes: PayReconcile
+# Interview preparation: PayReconcile
 
-Honest answers, written from what is actually in this repo. Numbers are from `docs/results_*.{txt,json}` (synthetic data).
+55 questions with the expected answer, **where it lives in the project**, and likely follow-ups. Numbers are measured and traceable
+(`docs/benchmarks.md`, `docs/results_*`). Everything is synthetic; say so early. Never claim production or cloud experience.
 
-## The 60-second pitch
-"Payment gateways, banks and order systems each hold a version of the same money. I built a pipeline that ingests the three,
-rejects bad records into a quarantine table, reconciles them in dbt, and reports money at risk. A quality gate stops a bad batch
-before it reaches the warehouse or the fraud model. Because the data is synthetic, I know the right answer for every record, so I
-measured detection instead of just claiming it."
+**60-second pitch.** "A merchant is paid from three places that must agree: the payment gateway, the bank and the order system.
+I built a platform that ingests the three, quarantines bad records, reconciles them with exact and constrained fuzzy matching, and
+reports money at risk. The engine is incremental, every match is explainable and every status change is on an append-only audit.
+Because the data is synthetic I know the right answer for every record, so I measured detection instead of asserting it, and I
+also ran experiments that went against my expectations, like partitioned Parquet, which was slower."
 
-## Data engineering
-**Why quarantine instead of dropping bad rows?** Dropped rows disappear silently. Quarantine keeps the raw payload and rule ids so the
-data owner can fix and replay, and reconciliation can tell "the bank paid for a payment we rejected" (`SOURCE_QUARANTINED`, an upstream
-quality issue) from a real orphan.
+---
+## A. Data engineering (15)
 
-**How is it idempotent?** Bronze partitions are overwritten per `ingest_date`; Silver uses keyed upserts (delete + insert, or "an older
-version never overwrites a newer one" for orders); SCD2 ignores a snapshot older than the current version; unchanged rows are not rewritten or re-logged; the reconciliation only writes real
-differences. Tests rerun a day, and replay an old day, and assert Silver counts, status counts and money are unchanged.
+**A1. Why DuckDB?** Analytical SQL (window functions, `QUALIFY`, `EXCEPT`, `levenshtein`) in-process with almost no idle memory; the
+whole daily run peaks at 380 MB including dbt, on an 8 GB laptop. *In the project:* `src/payreconcile/db.py`, `docs/architecture.md`.
+*Follow-ups:* concurrency (one writer process, so dbt runs as a subprocess), when it stops being enough (multi-writer, multi-TB), Postgres/warehouse comparison.
 
-**Replaying an old day: what went wrong once?** My first version passed the replayed day as the reconciliation `as_of` date, which moved
-the clock backwards and flipped MISSING items back to PENDING. I found it while measuring memory (I re-ran a day on the real warehouse),
-fixed it (`as_of` = latest day ever loaded) and added a regression test.
+**A2. Why Parquet?** Columnar, typed, compresses well, maps directly to object storage. Bronze is Parquet by `ingest_date`. Note the
+honest limit: I tested Parquet for **Silver** and it lost (A14). *In the project:* `ingest.write_bronze`. *Follow-ups:* row groups, predicate pushdown, small-file problem.
 
-**How does incremental loading work?** Orders come from a change log: `updated_at >= min(watermark - 1 day, run day start)` and
-`< run day + 1`. The overlap catches late updates; the `min()` makes replays of old days work. Gateway and settlements are date-partitioned
-files; late-arriving gateway records land in a later file and the change-log-driven reconciliation picks them up (see below).
+**A3. Why not Spark?** ~100k rows a day; Spark adds a JVM, a cluster and startup latency for no benefit here. I can explain what
+would change at scale (partitioned object storage, a warehouse, blocked fuzzy joins) but have not run Spark. *In the project:* `docs/cloud_design.md`. *Follow-ups:* where would the fuzzy join partition (merchant and date), skew.
 
-**Why does a halted batch load nothing?** A half-loaded day is hard to reason about and hard to replay. The previous good Gold keeps serving,
-the failure is visible in `ops.run_log`, and re-running the day after the fix is safe.
+**A4. Why not Kafka?** Feeds are daily files or paginated API pages; there is no event stream to justify it. A fake streaming demo would be a buzzword. *Follow-ups:* how would late webhooks change the design (the change-log/late-arrival handling already exists).
 
-**What does the gate catch that row-level rules cannot?** A whole batch being wrong while every row is valid. In the demo the gateway
-switches to paise (amounts x100): every row passes, the row-level score is 0.9988, but the distribution rule (batch mean vs trailing
-median) fails it. Without the gate, 24 merchants were flagged as anomalous on that day versus 2 normally.
+**A5. Why Prefect, not Airflow?** Prefect runs in-process with no server (retries and state, almost no RAM); Airflow needs a scheduler, web server and metadata DB, too heavy for 8 GB. It is optional (`flows.py`); the CLI is the primary path. *Follow-ups:* how a DAG per day and sensors on the bank file would map, backfills.
 
-**Why dbt as a subprocess?** DuckDB allows one writer process. In-process `dbtRunner` kept its own connection open and broke later
-connections in the same process; a subprocess is isolated and mirrors how an orchestrator would run it.
+**A6. Explain Bronze / Silver / Gold and the quarantine.** Bronze = raw strings + lineage; Quarantine = rejected rows with raw payload and rule ids; Silver = typed, repaired, de-duplicated; reconciliation state and Gold = derived only from Silver. *In the project:* layer table in `docs/architecture.md`. *Follow-ups:* why Bronze is strings, what "repair" means (amount symbols, date formats).
 
-**Why not Spark/Kafka/Airflow?** Data volume is ~100k rows a day; they add operational cost, not skill signal. I can explain what they
-would change (see `cloud_design.md`) but I have not run them.
+**A7. How do you guarantee idempotency?** Bronze partitions are overwritten per `ingest_date`; Silver upserts touch only new or changed rows (`EXCEPT`), so a replay is a true no-op; SCD2 ignores an older snapshot; reconciliation writes only real differences and the audit only status changes. Tests rerun a day, replay an old day, and run three failed attempts then one good one. *In the project:* `silver._upsert`, `tests/test_reconcile.py::test_rerunning_with_no_new_data_changes_nothing`, `tests/test_failure_recovery.py`. *Follow-ups:* what if the process dies mid-write (A11).
 
-**How would you scale it?** Partitioned object storage, a warehouse, block the fuzzy join on merchant and date and run it only over open
-items, partition Silver by date so the remaining scans become bounded look-backs (SLA + late-arrival window). The reconciliation is
-already incremental locally.
+**A8. How do you handle late-arriving settlements?** A late record enters Silver, the change log records its key, and the next reconciliation touches its match partner, order and siblings: an orphan or `MISSING_SETTLEMENT` item resolves without a rebuild, and the change is on the audit with reason `INPUT_CHANGE`. Aging into `MISSING` with no new data is `AGED`. *In the project:* `tests/test_reconcile.py` (`..._ages_into_missing_and_a_very_late_settlement_still_resolves_it`). *Follow-ups:* a late refund after the original resolved (the original is not reopened; tested).
 
-## Incremental reconciliation
+**A9. How do you handle schema drift?** A contract per dataset: missing required column -> whole file rejected and the gate halts; unexpected column -> dropped with a WARNING; renamed column -> resolved through an alias with a WARNING. The demo files include a rename (day 12) and an extra column (day 20). *In the project:* `contracts/*.yml`, `dq.evaluate`. *Follow-ups:* what if a column changes type (`GW-VAL-*` rules), versioned contracts.
 
-**Why did you make it incremental?** To bound daily work and to get things a rebuild cannot give: a stable, auditable history of status
-changes and matches that are not silently re-decided when unrelated data arrives. Speed was a hoped-for benefit, and I measured it.
+**A10. How does incremental loading of orders work?** A change log with `updated_at`; extract `updated_at >= min(watermark - 1 day, run-day start)` and `< run day + 1`. The overlap catches late updates; the `min()` makes replaying an old day work. *In the project:* `ingest.read_orders`. *Follow-ups:* CDC vs snapshots, deletes.
 
-**And did it get faster?** Not much, and I say so. The daily run evaluates about 6k items whether the state holds 29k or 272k (20% -> 2%).
-Versus the same code run from scratch it is 0.7x on a tiny history, 1.2x at 30 days and 1.6x at 90 (0.51 s vs 0.81 s), because DuckDB
-recomputes 272k items in under a second. Versus the old dbt path it is 24-39x, but that includes ~9 s of dbt start-up, so it flatters the
-algorithm. End to end, the 30-day backfill took 385 s versus 388 s, since the daily dbt run dominates. I would not extrapolate past the
-272k items I measured.
+**A11. What happens if the pipeline crashes mid-way?** Silver commits per dataset; reconciliation applies delta + audit + links + evidence + watermark in **one transaction**, so a crash leaves the previous state and a rerun catches up from the change log. Tested with an injected failure in the middle of the apply, a crash between Silver and reconciliation, and a dbt failure. *In the project:* `tests/test_reconcile.py::test_a_crash_mid_apply...`, `tests/test_failure_recovery.py`. *Follow-ups:* what is not atomic (Silver vs reconciliation across the boundary; recovery is by the watermark).
 
-**How do you know it is correct?** Three implementations must agree: the incremental state, the engine's own full mode, and a separate
-dbt SQL model. After 30 and 90 days there are 0 differences. Twenty unit tests cover late settlements, late refunds, orphans, corrected
-amounts, sticky and ambiguous matches, quarantine and order dependencies, the audit trail, crash safety and idempotency. I also broke
-the scoping, aging and stickiness logic on purpose to confirm tests fail (three of four mutants were caught; the fourth was equivalent
-because closure already covered it).
+**A12. Why is dbt run as a subprocess?** DuckDB allows a single writer process; running dbt's runner in-process kept its own connection open and broke later connections. A subprocess isolates it and mirrors an orchestrator. *In the project:* `transform.py`. *Follow-ups:* the cost (startup ~9 s of the run).
 
-**How does it find what to re-evaluate?** Silver upserts log every new or changed key to a change log (plus the old value of the order id
-or bank reference of a replaced row); quarantine changes are logged too. The scope is those keys, closed over their dependencies (match
-partner, refunds that reference them, siblings on the same order, order items), plus items that change with time (PENDING past the SLA,
-orders that just became old enough to judge), plus unmatched records that could fuzzy-compete with a scoped one.
+**A13. Tell me about the HTTP API.** A small FastAPI service serving the same seeded records (`/health`, `/transactions?date&page&page_size`), and a client with a per-request timeout, retries for transport errors/timeouts/429/5xx with capped exponential backoff, honouring `Retry-After`, no retry on other 4xx or malformed payloads. Tests inject 503s, delays and outages and prove API and file paths are interchangeable. It is a fixture for realism, not a service claim. *In the project:* `gateway_api.py`, `ingest.HttpGatewayClient`, `tests/test_gateway_api.py`. *Follow-ups:* idempotent retries (GET only), circuit breakers, auth (not implemented).
 
-**What is a sticky match and why?** A resolved link is only re-examined when one of its records changes. Otherwise a look-alike
-transaction arriving next week could silently un-match money that finance already signed off. The cost is a rare difference from a
-rebuild in ambiguous fuzzy cases; a test pins it down and `verify-recon` reports it.
+**A14. You tested partitioned Parquet. What happened?** I expected date partitions to cut scan cost. On 1x to 50x it made the unchanged engine 1.4x to 7.1x **slower** (4-5x more rows scanned) with identical results; at 100x only the table layout was run. The engine looks up by key, not date, so pruning never applies and re-reading many small files costs more. Ingestion was faster but is not the bottleneck and skips the change log. Decision: keep tables. A date-bounded engine is a possible next experiment (a date-bounded lookup was 5 to 12x faster in a micro-benchmark) but is **not built**. *In the project:* `scripts/benchmark_partitioning.py`, `docs/benchmarks.md`. *Follow-ups:* how you controlled the experiment (same data, same batch, state equality check), what you did not test.
 
-**How is the audit trail guaranteed?** The item diff, audit rows, link changes and the change-log watermark are written in one
-transaction, so a crash leaves the old state and a rerun redoes the same work. The audit table is append-only, records the reason
-(`NEW_ITEM`, `INPUT_CHANGE`, `AGED`, `RESOLVED`), and a dbt test asserts the last row per item explains the current status.
+**A15. How would you scale it 100x? What breaks first?** Measured to 8.6 M items on this laptop: incremental compute 8.76 s, full recompute 75.5 s, initial full build 157 s and 2.5 GB peak. Incremental compute still grows with history because statements scan whole tables. Next steps: bound scans by date with an unbounded fallback for late arrivals, block the fuzzy join by merchant and date, move to a warehouse. I would not claim a speedup before measuring. *Follow-ups:* memory limits, what to partition, incremental dbt.
 
-**A refund arrives after the original was resolved. What happens?** Only the refund's item is evaluated. The original keeps its row,
-run id and audit history (tested).
+---
+## B. SQL (10)
+All live in `src/payreconcile/reconcile.py`, `silver.py` and `dbt/models`.
 
-**What would you do next?** Partition Silver by date so scans are bounded look-backs, then re-benchmark at 10-100x the data. I would
-not claim a speedup at scale before measuring it.
+**B1. Fuzzy match with a uniqueness rule.** Join open txns to open settlements on merchant, amount within tolerance, date window, `levenshtein <= 2`; then `count(*) over (partition by txn_id)` and `... by settlement_id` must both equal 1. *Follow-ups:* why not pick the closest (silent false matches), complexity of the join.
 
-## SQL (all in `dbt/models` and `src/payreconcile/silver.py`)
-* **Fuzzy match with uniqueness:** candidates joined on merchant, amount and date window, `levenshtein <= 2`, then
-  `count(*) over (partition by txn_id)` and `... by settlement_id` must both be 1.
-* **Dedup:** `row_number() over (partition by key order by ...) = 1` / `QUALIFY`.
-* **SCD2:** hash of tracked attributes; close the old row (`valid_to = snapshot date`), insert the new one; facts join on
-  `valid_from <= date < valid_to`. Test: exactly one current row per merchant and no overlapping windows.
-* **Anti-joins** for orphans (`NOT IN` here is safe because the sub-selects filter NULL keys; otherwise use `NOT EXISTS`).
-* **Fan-out trap:** a payment can have several settlement candidates; joining without the uniqueness step would double-count money.
-* **Filtered aggregates:** `count(*) filter (where status = ...)` for the daily scorecard; `quantile_cont` for settlement-lag p95.
+**B2. Dedup keeping the latest.** `row_number() over (partition by key order by updated_at desc) = 1` or `QUALIFY`. Used for order change-log rows.
 
-## Analytics
-* **Match rate** excludes PENDING (settlement not yet due), otherwise recent days look artificially bad.
-* **Money at risk** is defined per status and shown by status; duplicate-charge exposure is deliberately separate (that money was
-  settled correctly, the customer was charged wrongly).
-* **A KPI dropped:** check Data health first (freshness, volume, quarantine rate) before assuming a business cause.
+**B3. SCD2 close-and-open.** Compare a hash of tracked attributes; close the current row (`valid_to = snapshot date`, `is_current = false`), insert a new current row; facts join on `valid_from <= date < valid_to`. Tests: one current row per merchant, no overlapping windows, and an older snapshot never overwrites a newer version.
 
-## Data science
-**Why merchant-day z-scores?** Fraud patterns (velocity bursts, card testing, refund spikes) are a merchant deviating from its own history.
-Baselines use previous days only (expanding mean/std shifted by one) so there is no look-ahead leakage.
+**B4. Change detection with `EXCEPT`.** `SELECT ... FROM stg EXCEPT SELECT ... FROM silver` returns new or changed rows (NULL-safe), so identical rows are never rewritten. *Follow-ups:* `EXCEPT` vs hash compare vs `MERGE`.
 
-**Result and honesty:** on 4,600 eligible merchant-days with 30 injected anomalies, Isolation Forest got precision 0.43 / recall 0.67 and a
-simple "any z >= 4" rule got precision 0.61 / recall 1.00. The simple rule won. The injected anomalies are large by construction, so I would
-not claim either number transfers to real fraud. The point is the trust boundary: features come from Silver only, and the model refuses to
-refresh if the latest run was halted by the gate.
+**B5. `NOT IN` vs `NOT EXISTS`.** `NOT IN` returns nothing if the subquery contains a NULL; I use `NOT IN` only where the subquery filters NULL keys, otherwise `NOT EXISTS` / anti-join.
 
-**Contamination = 0.01** was set a priori (about the expected anomaly rate) and not tuned against the answer key.
+**B6. Filtered aggregates.** `count(*) filter (where status = 'MATCHED')` for the scorecard; `quantile_cont` for settlement-lag p95.
 
-## Limitations I would volunteer
-* Synthetic data whose defect types match the rules I wrote. The 100% status accuracy proves the logic is self-consistent, not that it
-  works on real feeds. Real data would need iteration with the data owners.
-* One known miss: 17 duplicate charges are not found (their original payment was itself quarantined, so nothing to pair with).
-* A valid duplicate charge that crossed midnight was quarantined by my first version of the timestamp rule; I added a 24h tolerance and
-  the false positive disappeared (precision 99.97% -> 100%).
-* `replay` re-evaluates quarantined rows after reference data or a rule changes (e.g. a merchant onboarded late).
-* Gateway "API" is a file-based stand-in; retries are tested with injected failures, not a real network.
-* No PII handling, auth, encryption or cloud deployment.
-* The incremental reconciliation's measured wall-clock gain over a full in-process rebuild is small at this size (1.2x at 30 days, 1.6x
-  at 90) and end-to-end daily runtime did not improve (dbt dominates); its value here is bounded work, stable matches, an audit trail
-  and safe reruns. Its runtime still creeps up with history because some statements scan whole tables.
-* Sticky matches can differ from a from-scratch rebuild in rare ambiguous fuzzy cases (documented and tested).
+**B7. Join fan-out.** A payment can have several settlement candidates; joining without the uniqueness step double-counts money. Aggregate first or join at the right grain; dedup duplicate-charge joins with `group by txn_id` (a txn can have several earlier charges).
 
-## Resume bullets (numbers are measured; keep the "synthetic" qualifier)
-**Data Engineer**
-* Built a Bronze/Silver/Gold payments-reconciliation pipeline (Python, DuckDB, dbt, Parquet) over 3 sources with a schema-contract check,
-  YAML-driven quality rules, a quarantine table and a quality gate that halts bad batches before they reach the warehouse or model.
-* Implemented incremental, idempotent loads (watermark with overlap, keyed upserts, SCD2 merchant dimension) verified by tests that replay
-  days; 65 automated tests plus 45 dbt tests run on every push in GitHub Actions.
-* Built an incremental reconciliation engine (change-log scope, sticky matches, one-transaction apply, append-only audit trail) that
-  re-evaluates 2-7% of state items per run and matches a from-scratch rebuild exactly (0 differences over 272,509 items, checked against
-  two independent implementations); measured 1.6x faster than a full in-process rebuild at 90 days (see the honest caveats).
-* Scored the pipeline against a seeded answer key: 100% recall and precision on 3,733 injected bad rows and 100% reconciliation-status accuracy on
-  ~87k synthetic transactions (self-consistency check on synthetic data).
+**B8. Date arithmetic and ageing.** `settlement_date - cast(created_at as date)`; exception age = as-of date minus event date, bucketed 0-3/4-7/8-14/15-30/31+. `PENDING` when `txn_date + sla < as_of` is false.
 
-**Data Analyst**
-* Defined reconciliation KPIs (match rate, money at risk by status, settlement lag, duplicate-charge exposure) and built a five-tab
-  Streamlit dashboard for finance operations and data health; surfaced INR 2.58M of synthetic money at risk across 5 exception types.
-* Wrote window-function/CTE SQL for fuzzy matching, deduplication, SCD2 and daily scorecards in dbt with tests.
+**B9. Late-arriving data in SQL.** Full rebuild vs scoped recompute: the scope is built with `UNION` of change-log keys and their dependants, then the same item SQL runs over the scope. *Follow-ups:* how you prove equivalence (three implementations).
 
-**Data Scientist**
-* Built a merchant-day fraud-signal model (Isolation Forest vs a z-score rule baseline) with leakage-free per-merchant baselines and
-  evaluated it against injected patterns; reported that the simple rule outperformed the model (recall 1.00 vs 0.67).
-* Blocked bad data from reaching the model: a rupees-to-paise batch that passes all row checks was halted by a distribution check
-  (24 vs 2 spurious flagged merchants without the gate).
+**B10. Which query is slowest and how do you know?** Profiling per statement (DuckDB `cumulative_rows_scanned`): no single statement dominates; ~60 statements each scan Silver, so rows scanned grows with history (6.3 M at 1x to 509 M at 100x).
+
+---
+## C. Reconciliation (10)
+
+**C1. Why fuzzy matching at all?** Banks mistype references; without it a correct payment shows as one missing settlement plus one orphan. It is constrained (merchant, amount, window, edit distance) and unique from both sides. On the synthetic data: 906 fuzzy matches, 0 wrong.
+
+**C2. How do you prevent false matches?** Hard constraints, then a uniqueness rule: if a txn has two candidate settlements (or vice versa) nothing is linked and the candidates are recorded as `AMBIGUOUS_NOT_LINKED` with the reason. Test: two look-alike txns and one typo'd reference stay unmatched.
+
+**C3. How do you audit a match?** `gold.recon_match_evidence` keeps features, candidate counts, score, threshold, decision and reason for every exact link and every fuzzy candidate; `explain` and the dashboard show it with the audit history and source records. *Honest note:* the "score" is reference similarity; the decision is the uniqueness rule.
+
+**C4. What is a sticky match and why?** A resolved link is re-examined only if one of its records changes, so a look-alike arriving later cannot silently un-match money that was signed off. Cost: a rare difference from a from-scratch rebuild in ambiguous fuzzy cases (tested and documented).
+
+**C5. How does duplicate-charge detection work?** Confirmed: two trusted captured payments for one order, same merchant and amount, within 10 minutes. Suspected: one trusted payment plus a quarantined attempt on the same order that is not contradicted by its own fields. Two tiers, never merged. Measured: confirmed 677/694 (R 97.55%), combined 691/694 (R 99.57%), precision 100%.
+
+**C6. Why not lower the threshold to catch the last 3 duplicates?** All 3 have an original quarantined *without an order id*; the only signal left is merchant + amount + time. On this data it finds them with 0 false positives, but the amounts are continuous, so that says nothing about fixed-price merchants where many legitimate payments share merchant, amount and minute. I documented it and did not adopt it. *In the project:* `docs/investigation_misses.md`.
+
+**C7. Why can't you flag a payment without an order when the payment was quarantined?** It is not a trusted item. It stays visible in quarantine with its rule ids and its bank money shows as `SOURCE_QUARANTINED`. On payments that reached trusted data recall is 597/597; the 12 misses are all quarantined payments (98.03% overall).
+
+**C8. PENDING vs MISSING_SETTLEMENT?** `PENDING` = inside the settlement SLA (3 days); `MISSING_SETTLEMENT` = past it with no settlement. The match rate excludes PENDING from the denominator so recent days do not look bad.
+
+**C9. How do refunds reconcile?** A refund expects a negative settlement. A refund whose original exists nowhere is `ORPHAN_REFUND`; if the original arrives late the refund re-resolves; a refund arriving after the original was resolved does not reopen the original (tested).
+
+**C10. How is `money_at_risk` defined?** Per status: mismatch = |settled - expected|; missing = expected; orphan settlement = settled; orphan refund = refund amount; order without payment = order amount. It is exposure, not confirmed loss; duplicate exposure is separate. `docs/kpi_definitions.md`.
+
+---
+## D. Data quality (5)
+
+**D1. Why quarantine instead of dropping bad rows?** Dropped rows vanish silently and cannot be fixed or replayed. Quarantine keeps the raw payload and rule ids; reconciliation can also tell "the bank paid for a payment we rejected" (`SOURCE_QUARANTINED`) from a real orphan.
+
+**D2. Explain the score and the gate.** Severity-weighted mean of `1 - violations/evaluated` per rule (CRITICAL 5, ERROR 3, WARN 1), dataset-weighted across datasets. Any FAIL or a score below 0.90 halts the batch (nothing loaded, Gold not rebuilt). *Key point:* the score is not enough.
+
+**D3. What does the gate catch that row rules cannot?** A whole batch being wrong while every row is valid: a rupees-to-paise switch scores 0.9988 but fails the distribution rule (batch mean vs trailing median). Without the gate 24 merchants were flagged as anomalous that day vs 2 normally.
+
+**D4. How do you handle bad reference data?** FK rules against the current merchant master; rows failing them are quarantined; when reference data arrives, `replay` releases them and the incremental reconciliation updates. Tested with merchants and orders.
+
+**D5. How do you keep the rule catalogue truthful?** It is generated from the contracts and the engine (`scripts/gen_rule_docs.py`), lists dataset, field, severity, expectation, implementation and failure behaviour for all 50 rules, validates a coverage matrix, and CI fails if the doc is out of date.
+
+---
+## E. dbt (5)
+
+**E1. Why dbt for marts but a Python engine for reconciliation?** Marts, tests and lineage suit dbt. The reconciliation needs scope closure, sticky links, an audit diff and one atomic apply, which a dbt incremental model cannot express cleanly. The old dbt SQL remains as an independent oracle.
+
+**E2. What do your dbt tests prove?** unique/not-null/relationships/accepted values, SCD2 integrity, "MATCHED means within tolerance", "every captured txn is reconciled exactly once", "no quarantined row in Gold", "the audit trail explains the current state": 45 tests per daily build.
+
+**E3. What is the reference model for?** An independent full-rebuild implementation of the same rules used by `verify-recon --reference` and the end-to-end test to prove the incremental state is correct. Excluded from the daily build by tag.
+
+**E4. How is SCD2 tested?** Exactly one current row per merchant, no overlapping validity windows; facts join to the version valid at the event date; risk tier and fee history are never overwritten.
+
+**E5. Why is dbt 89% of the run?** Start-up, parsing, materialising marts and 45 tests cost ~11 s regardless of data size, while ingestion + quality + Silver + reconciliation together take ~1.4 s. *In the project:* `docs/results_stage_resources_30day_backfill.json`.
+
+---
+## F. ML / anomaly detection (5)
+
+**F1. Why did Isolation Forest perform worse than the baseline?** Measured F1 0.53 vs 0.76 (recall 0.67 vs 1.00). *Interpretation, not proven:* the injected anomalies are large deviations on single count features, exactly what a z-score rule looks for; Isolation Forest isolates in a 6-D space dominated by normal points, and refund spikes (one feature) were the weakest (recall 0.25). I did not tune it against the answer key. Lesson: try the simple baseline first.
+
+**F2. How do you prevent leakage?** Prediction time = end of the merchant-day; feature cutoff = previous days only (expanding baseline shifted by one); inputs = gateway transactions only; labels read only after scoring. Executable tests: a day's features do not change when later days arrive, scrambling settlements/orders/reconciliation changes nothing, the scoring function has no label parameter.
+
+**F3. Which metrics and why?** Precision, recall, F1 and explicit FP/FN: the classes are extremely imbalanced (30 of 4,600), so accuracy is meaningless.
+
+**F4. What are the limits of the synthetic anomalies?** They are injected by my own generator (bursts, card-testing, refund spikes), large and clean. They show the method works on them, not that it detects real fraud. I call the output "merchant risk signals" and never "fraud detector".
+
+**F5. Why is there no train/test split?** The model is unsupervised and the baseline is a fixed rule, so nothing is fit on labels; evaluation is against injected labels on the same merchant-days. A supervised model would need a time-based split.
+
+---
+## G. System design (5)
+
+**G1. Design this for 100 M transactions a day.** Object storage (partitioned by date) for Bronze, a warehouse for Silver/Gold, orchestration by day with sensors, reconciliation as incremental warehouse models over a bounded look-back (SLA + late-arrival window) with the fuzzy join blocked by merchant and date, the change log as a table stream. Design only; none of it is implemented. `docs/cloud_design.md`.
+
+**G2. Multiple banks and gateways?** Add a `source_system` key and a contract per feed; reconciliation keys become `(source, ref)`; settlement lag and SLA per partner (not possible today: one synthetic bank feed).
+
+**G3. Near-real-time?** Keep the same change-log design and run the incremental engine on micro-batches; the sticky/audit semantics carry over. I have not built streaming.
+
+**G4. PII and security?** Not implemented. Would need tokenised identifiers, column-level access, encryption at rest, secrets management and a data-classification review before any real data.
+
+**G5. Monitoring and alerting?** Per-stage time, peak RSS, rows in/out/rejected, DQ scores and gate decisions are recorded and shown on the Pipeline Health page; alert hooks are **not** implemented (a HALT is visible in `ops.run_log`).
+
+---
+## Questions to prepare an honest answer for
+* **Why does incremental processing not reduce end-to-end runtime?** dbt is 89% of a ~12.4 s run; the reconciliation step is 0.45 s. Incremental's benefit here is bounded work, stable matches, an audit trail and safe reruns. At larger history it does pay: full/incremental compute ratio 1.7x at 1x to 8.6x at 100x (measured).
+* **What are the limitations of synthetic data?** Defects match my rules, precision figures are self-consistency, distributions are simpler than real ones, one bank feed, no fixed-price merchants, no PII.
+* **What went wrong during the build?** A PowerShell edit mangled the rupee symbol, so the pipeline quarantined repairable values (found by measuring precision); replaying an old day rewound the reconciliation clock (regression test added); replay could overwrite newer trusted data with a stale copy (fixed, tested); an evaluator bug showed 49% duplicate recall when the real figure was 97%. Each is a test now.
