@@ -46,7 +46,9 @@ CREATE TABLE IF NOT EXISTS ops.run_log (
     records_written BIGINT, records_rejected BIGINT, error VARCHAR);
 CREATE TABLE IF NOT EXISTS ops.task_log (
     run_id VARCHAR, run_date DATE, task VARCHAR, status VARCHAR, duration_s DOUBLE,
-    rows_in BIGINT, rows_out BIGINT, rows_rejected BIGINT, detail VARCHAR);
+    rows_in BIGINT, rows_out BIGINT, rows_rejected BIGINT, detail VARCHAR, peak_rss_mb DOUBLE, rss_start_mb DOUBLE);
+ALTER TABLE ops.task_log ADD COLUMN IF NOT EXISTS peak_rss_mb DOUBLE;
+ALTER TABLE ops.task_log ADD COLUMN IF NOT EXISTS rss_start_mb DOUBLE;
 CREATE TABLE IF NOT EXISTS ops.dq_results (
     run_id VARCHAR, run_date DATE, dataset VARCHAR, rule_id VARCHAR, severity VARCHAR, description VARCHAR,
     evaluated BIGINT, violations BIGINT, ratio DOUBLE, status VARCHAR, action VARCHAR);
@@ -95,6 +97,11 @@ CREATE TABLE IF NOT EXISTS gold.reconciliation_audit (
     item_id VARCHAR, item_type VARCHAR, change_kind VARCHAR, reason VARCHAR,
     old_status VARCHAR, new_status VARCHAR, old_settlement_id VARCHAR, new_settlement_id VARCHAR,
     old_money_at_risk DOUBLE, new_money_at_risk DOUBLE, changed_at TIMESTAMP);
+
+-- Append-only record of every quarantine replay decision (RELEASED / STILL_INVALID / SUPERSEDED).
+CREATE TABLE IF NOT EXISTS ops.replay_log (
+    replay_id VARCHAR, run_date DATE, dataset VARCHAR, natural_key VARCHAR, outcome VARCHAR,
+    old_rule_ids VARCHAR, new_rule_ids VARCHAR, replayed_at TIMESTAMP);
 
 CREATE TABLE IF NOT EXISTS ops.watermarks (dataset VARCHAR PRIMARY KEY, watermark TIMESTAMP);
 """

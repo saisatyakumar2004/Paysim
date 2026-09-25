@@ -16,7 +16,7 @@ from datetime import date, datetime, timedelta
 
 import pandas as pd
 
-from . import db, dq, ingest, quarantine, reconcile, silver, transform
+from . import db, dq, ingest, quarantine, reconcile, resources, silver, transform
 
 log = logging.getLogger("payreconcile.pipeline")
 
@@ -39,6 +39,10 @@ class RunSummary:
     error: str | None = None
 
 
+_TASK_INSERT = ("INSERT INTO ops.task_log (run_id, run_date, task, status, duration_s, rows_in, rows_out, rows_rejected, "
+                "detail, peak_rss_mb, rss_start_mb) VALUES (?,?,?,?,?,?,?,?,?,?,?)")
+
+
 class _Tasks:
     """Times each step and records it in ops.task_log."""
 
@@ -49,8 +53,10 @@ class _Tasks:
     def task(self, name: str, rows_in: int | None = None):
         t0 = time.perf_counter()
         rec = {"rows_in": rows_in, "rows_out": None, "rows_rejected": None, "detail": None}
+        mem = resources.PeakMemory()
         try:
-            yield rec
+            with mem:
+                yield rec
             status = "SUCCESS"
         except Exception as exc:
             status = "FAILED"
@@ -58,11 +64,12 @@ class _Tasks:
             raise
         finally:
             dur = time.perf_counter() - t0
-            self.con.execute("INSERT INTO ops.task_log VALUES (?,?,?,?,?,?,?,?,?)", [
+            self.con.execute(_TASK_INSERT, [
                 self.run_id, self.run_date, name, status, dur, rec["rows_in"], rec["rows_out"],
-                rec["rows_rejected"], rec["detail"]])
+                rec["rows_rejected"], rec["detail"], mem.peak_mb, mem.start_mb])
             log.info(json.dumps({"run_id": self.run_id, "task": name, "status": status, "seconds": round(dur, 3),
-                                 "rows_in": rec["rows_in"], "rows_out": rec["rows_out"]}))
+                                 "rows_in": rec["rows_in"], "rows_out": rec["rows_out"],
+                                 "peak_rss_mb": None if mem.peak_mb is None else round(mem.peak_mb)}))
 
 
 def _history(con, dataset: str, before: date) -> list[int]:
@@ -212,15 +219,17 @@ def _closed_task(run_id: str, run_date: date, name: str):
     """Task logging for steps that need the warehouse file free (dbt): reopens the DB just to log."""
     t0 = time.perf_counter()
     rec = {"detail": None, "status": "SUCCESS"}
+    mem = resources.PeakMemory()                       # includes the dbt subprocess
     try:
-        yield rec
+        with mem:
+            yield rec
     except Exception as exc:
         rec["status"], rec["detail"] = "FAILED", f"{type(exc).__name__}: {exc}"
         raise
     finally:
         con = db.connect()
-        con.execute("INSERT INTO ops.task_log VALUES (?,?,?,?,?,?,?,?,?)", [
-            run_id, run_date, name, rec["status"], time.perf_counter() - t0, None, None, None, rec["detail"]])
+        con.execute(_TASK_INSERT, [run_id, run_date, name, rec["status"], time.perf_counter() - t0, None, None, None,
+                                   rec["detail"], mem.peak_mb, mem.start_mb])
         con.close()
 
 

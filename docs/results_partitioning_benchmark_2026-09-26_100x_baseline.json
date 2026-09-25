@@ -1,0 +1,94 @@
+{
+  "run_at": "2026-09-26T00:42:55",
+  "hardware": {
+    "cpu": "Intel64 Family 6 Model 186 Stepping 3, GenuineIntel",
+    "logical_cpus": 12,
+    "ram_gb": 7.7,
+    "free_ram_gb_at_start": 3.0
+  },
+  "software": {
+    "python": "3.12.10",
+    "duckdb": "1.5.5",
+    "pandas": "3.0.6",
+    "pyarrow": "25.0.1",
+    "dbt-core": "1.12.5",
+    "os": "Windows-11-10.0.26200-SP0"
+  },
+  "config": {
+    "scales": "100",
+    "reps": 1,
+    "dbt_max_scale": 10,
+    "full_max_scale": 100,
+    "layouts": "baseline",
+    "orders_per_day": 3000,
+    "base_days": 30,
+    "duckdb_memory_limit": "3GB",
+    "duckdb_threads": 4,
+    "psutil_available": true
+  },
+  "method": "(per scale S; history = 30*S days at a FIXED 3,000 orders/day, so the state grows while the daily batch does not):\n  1. Synthesise Silver history + one more \"next day\" batch deterministically in SQL (no randomness beyond hash()).\n  2. Build reconciliation state with the real engine (a full run; timed).\n  3. Ingest the next-day batch into Silver: DuckDB typed upsert (real _upsert) vs Parquet partition rewrite.\n  4. Run the real incremental reconciliation on both layouts; count rows scanned (DuckDB profiling), time, peak RSS.\n  5. Compare the two final reconciliation states (must be identical), then time a full recompute and a dbt build.\n  6. Micro-benchmark the key-lookup pattern with and without a date bound.\n\n\"1x\" = the 30-day / 3,000-orders-per-day benchmark (~91k reconciliation items). Scales that do not fit the machine are\nreported as NOT RUN with the reason; nothing is extrapolated.",
+  "results": [
+    {
+      "scale": 100,
+      "history_days": 3000,
+      "orders_per_day": 3000,
+      "history_rows": {
+        "orders": 9000000,
+        "gateway_txns": 9250615,
+        "settlements": 8487402
+      },
+      "synth_seconds": 28.4,
+      "initial_full_reconcile": {
+        "seconds": 157.15,
+        "items": 8622104,
+        "peak_rss_mb": 2471
+      },
+      "batch_rows": {
+        "orders": 3000,
+        "gateway_txns": 3076,
+        "settlements": 2784
+      },
+      "ingest_next_day": {
+        "baseline_duckdb_upsert_s": 12.916,
+        "partitioned_parquet_rewrite_s": null,
+        "baseline_peak_rss_mb": 2338,
+        "note": "typed batch in both cases; baseline also records the change log"
+      },
+      "disk_mb": {
+        "duckdb_file_after_batch": 1214.3,
+        "silver_parquet_dir": null
+      },
+      "baseline": {
+        "incremental_rows_scanned": 508744598,
+        "incremental_statements": 46,
+        "incremental_compute_peak_rss_mb": 1984,
+        "incremental_compute_s": 8.757,
+        "incremental_compute_all_s": [
+          8.757
+        ],
+        "incremental_real_s": 11.056,
+        "incremental_items_evaluated": 5791,
+        "incremental_items_changed": 5655,
+        "incremental_real_peak_rss_mb": 1968,
+        "state": {
+          "items": 8624929,
+          "money": 159635579.67,
+          "by_status": {
+            "AMOUNT_MISMATCH": 125992,
+            "MATCHED": 8362909,
+            "MISSING_SETTLEMENT": 130945,
+            "ORPHAN_SETTLEMENT": 1285,
+            "PENDING": 3798
+          },
+          "links": 8488901
+        },
+        "full_rows_scanned": 732141263,
+        "full_compute_s": 75.505,
+        "full_compute_peak_rss_mb": 2586,
+        "dbt_build_s": "NOT RUN (above --dbt-max-scale)"
+      },
+      "layouts_produce_identical_state": "n/a (baseline only)",
+      "lookup_micro": "NOT RUN (baseline only)"
+    }
+  ]
+}

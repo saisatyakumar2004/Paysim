@@ -1,0 +1,138 @@
+{
+  "run_at": "2026-09-26T00:35:13",
+  "hardware": {
+    "cpu": "Intel64 Family 6 Model 186 Stepping 3, GenuineIntel",
+    "logical_cpus": 12,
+    "ram_gb": 7.7,
+    "free_ram_gb_at_start": 2.4
+  },
+  "software": {
+    "python": "3.12.10",
+    "duckdb": "1.5.5",
+    "pandas": "3.0.6",
+    "pyarrow": "25.0.1",
+    "dbt-core": "1.12.5",
+    "os": "Windows-11-10.0.26200-SP0"
+  },
+  "config": {
+    "scales": "50",
+    "reps": 2,
+    "dbt_max_scale": 10,
+    "full_max_scale": 50,
+    "layouts": "baseline,partitioned",
+    "orders_per_day": 3000,
+    "base_days": 30,
+    "duckdb_memory_limit": "3GB",
+    "duckdb_threads": 4,
+    "psutil_available": true
+  },
+  "method": "(per scale S; history = 30*S days at a FIXED 3,000 orders/day, so the state grows while the daily batch does not):\n  1. Synthesise Silver history + one more \"next day\" batch deterministically in SQL (no randomness beyond hash()).\n  2. Build reconciliation state with the real engine (a full run; timed).\n  3. Ingest the next-day batch into Silver: DuckDB typed upsert (real _upsert) vs Parquet partition rewrite.\n  4. Run the real incremental reconciliation on both layouts; count rows scanned (DuckDB profiling), time, peak RSS.\n  5. Compare the two final reconciliation states (must be identical), then time a full recompute and a dbt build.\n  6. Micro-benchmark the key-lookup pattern with and without a date bound.\n\n\"1x\" = the 30-day / 3,000-orders-per-day benchmark (~91k reconciliation items). Scales that do not fit the machine are\nreported as NOT RUN with the reason; nothing is extrapolated.",
+  "results": [
+    {
+      "scale": 50,
+      "history_days": 1500,
+      "orders_per_day": 3000,
+      "history_rows": {
+        "orders": 4500000,
+        "gateway_txns": 4624470,
+        "settlements": 4241153
+      },
+      "synth_seconds": 15.1,
+      "initial_full_reconcile": {
+        "seconds": 63.14,
+        "items": 4310171,
+        "peak_rss_mb": 2670
+      },
+      "parquet_export_seconds": 31.6,
+      "parquet_files": {
+        "gateway_txns": 2973,
+        "settlements": 2946,
+        "orders": 1515
+      },
+      "batch_rows": {
+        "orders": 3000,
+        "gateway_txns": 3088,
+        "settlements": 2861
+      },
+      "ingest_next_day": {
+        "baseline_duckdb_upsert_s": 3.042,
+        "partitioned_parquet_rewrite_s": 0.027,
+        "baseline_peak_rss_mb": 1350,
+        "note": "typed batch in both cases; baseline also records the change log"
+      },
+      "disk_mb": {
+        "duckdb_file_after_batch": 606.5,
+        "silver_parquet_dir": 461.8
+      },
+      "baseline": {
+        "incremental_rows_scanned": 245376542,
+        "incremental_statements": 46,
+        "incremental_compute_peak_rss_mb": 1067,
+        "incremental_compute_s": 3.872,
+        "incremental_compute_all_s": [
+          3.883,
+          3.861
+        ],
+        "incremental_real_s": 4.565,
+        "incremental_items_evaluated": 5922,
+        "incremental_items_changed": 5786,
+        "incremental_real_peak_rss_mb": 1066,
+        "state": {
+          "items": 4313062,
+          "money": 79524358.38,
+          "by_status": {
+            "AMOUNT_MISMATCH": 63256,
+            "MATCHED": 4180135,
+            "MISSING_SETTLEMENT": 65222,
+            "ORPHAN_SETTLEMENT": 623,
+            "PENDING": 3826
+          },
+          "links": 4243391
+        },
+        "full_rows_scanned": 366150727,
+        "full_compute_s": 24.99,
+        "full_compute_peak_rss_mb": 2145,
+        "dbt_build_s": "NOT RUN (above --dbt-max-scale)"
+      },
+      "partitioned": {
+        "incremental_rows_scanned": 1190800328,
+        "incremental_statements": 46,
+        "incremental_compute_peak_rss_mb": 1121,
+        "incremental_compute_s": 27.366,
+        "incremental_compute_all_s": [
+          27.104,
+          27.627
+        ],
+        "incremental_real_s": 28.071,
+        "incremental_items_evaluated": 5922,
+        "incremental_items_changed": 5786,
+        "incremental_real_peak_rss_mb": 1125,
+        "state": {
+          "items": 4313062,
+          "money": 79524358.38,
+          "by_status": {
+            "AMOUNT_MISMATCH": 63256,
+            "MATCHED": 4180135,
+            "MISSING_SETTLEMENT": 65222,
+            "ORPHAN_SETTLEMENT": 623,
+            "PENDING": 3826
+          },
+          "links": 4243391
+        },
+        "full_rows_scanned": 911512317,
+        "full_compute_s": 52.003,
+        "full_compute_peak_rss_mb": 2231,
+        "dbt_build_s": "NOT RUN (above --dbt-max-scale)"
+      },
+      "layouts_produce_identical_state": true,
+      "lookup_micro": {
+        "baseline_no_date_bound_s": 0.122,
+        "baseline_date_bound_s": 0.01,
+        "baseline_old_ids_no_bound_s": 0.105,
+        "parquet_no_date_bound_s": 1.187,
+        "parquet_date_bound_s": 0.141,
+        "parquet_old_ids_no_bound_s": 1.226
+      }
+    }
+  ]
+}
