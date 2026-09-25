@@ -9,11 +9,11 @@ from __future__ import annotations
 
 import json
 import uuid
-from datetime import date, datetime
+from datetime import date
 
 import pandas as pd
 
-from . import db, dq, ingest, silver, transform
+from . import db, dq, ingest, quarantine, silver, transform
 
 APPLY = {"gateway": silver.apply_gateway, "orders": silver.apply_orders, "settlements": silver.apply_settlements}
 SKIP_RULES = ("SCHEMA_REJECT", "GW-UNQ-01", "ST-UNQ-01")
@@ -35,18 +35,8 @@ def replay(dataset: str, run_date: date, run_dbt: bool = True) -> dict:
         released = 0 if res.good is None else len(res.good)
         if released:
             APPLY[dataset](con, res.good, run_id)
-        # replace this day's replayable quarantine rows with whatever still fails
-        con.execute("DELETE FROM quarantine.rows WHERE dataset = ? AND run_date = ? AND rule_ids NOT IN (?, ?, ?)",
-                    [dataset, run_date, *SKIP_RULES])
-        q = res.quarantined
-        if q is not None and len(q):
-            qdf = q.assign(run_id=run_id, run_date=run_date, dataset=dataset, reason=q["rule_ids"],
-                           quarantined_at=datetime.now())
-            qdf = qdf[["run_id", "run_date", "dataset", "natural_key", "order_id", "rule_ids", "reason", "raw_json",
-                       "quarantined_at"]]
-            con.register("qdf", qdf)
-            con.execute("INSERT INTO quarantine.rows SELECT * FROM qdf")
-            con.unregister("qdf")
+        # replace this day's replayable quarantine rows with whatever still fails (logs the state changes)
+        quarantine.replace(con, run_id, run_date, dataset, res.quarantined, keep_rules=SKIP_RULES)
         con.execute("INSERT INTO ops.task_log VALUES (?,?,?,?,?,?,?,?,?)", [
             run_id, run_date, f"replay_{dataset}", "SUCCESS", 0.0, len(rows), released, len(rows) - released, None])
         latest = con.execute("SELECT max(run_date) FROM ops.run_log WHERE status LIKE 'SUCCESS%'").fetchone()[0]

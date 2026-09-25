@@ -25,7 +25,7 @@ merchants weekly CSV       ┘    watermark)        ▼
                                                         SILVER  typed, repaired, de-duplicated, idempotent upserts
                                                              │  (merchants = SCD Type 2)
                                                              ▼
-                                                   dbt: RECONCILIATION + STAR SCHEMA + MARTS  (GOLD)  + 44 tests
+                                                   incremental RECONCILIATION (state + audit) -> dbt STAR SCHEMA + MARTS + 45 tests
                                                              │
                               ┌──────────────────────────────┼───────────────────────────┐
                               ▼                              ▼                           ▼
@@ -57,9 +57,36 @@ Single-file warehouse: `data/warehouse.duckdb` with schemas `silver`, `quarantin
 6. **Duplicate charge:** same order, merchant and amount, captured again within 10 minutes under a new `txn_id`.
 7. `money_at_risk` is defined per status (see `fact_reconciliation.sql`); duplicate exposure is tracked separately.
 
-The reconciliation is a **full rebuild** from Silver on every run (deterministic, so idempotent), not an incremental model: at this
-volume it takes seconds, and it is the only way for a late-arriving gateway record to *retroactively* clear an earlier orphan.
-`as_of` is the latest day ever loaded, so replaying an old day cannot move the clock backwards (covered by a test).
+## Incremental reconciliation (`src/payreconcile/reconcile.py`)
+
+State: `gold.fact_reconciliation` (one row per item), `gold.recon_links` (txn <-> settlement), `gold.reconciliation_audit`
+(append-only), `ops.recon_state` (change-log watermark + as-of date), `ops.recon_runs` (per-run scope and timing).
+
+**Change tracking.** Silver upserts touch only rows that are new or whose content changed (`EXCEPT` on all business columns) and log
+each key to `ops.change_log` (also the *old* order id / bank reference of a replaced row). Quarantine changes are logged too, because a
+settlement for a quarantined payment is not an orphan and a released payment must re-open it.
+
+**Scope of a run** = items touched by a change, then closed over dependencies:
+* a changed gateway record -> its item, its settlement (by reference and by link), refunds that reference it, siblings on the same
+  order (duplicate-charge flag), its order item;
+* a changed settlement -> its exact partner and linked txn; a changed order -> its payments (`NO_ORDER` / `AMOUNT_DIFF` flags);
+* time: `PENDING` items past the SLA, and orders that just became old enough to be judged;
+* fuzzy closure: every still-unmatched record that could compete for a scoped unmatched record, so the "unique from both sides" test
+  sees all candidates. Already-linked records are never pulled in.
+
+**Then** exact matching and fuzzy matching inside the scope, the new state of each scoped item is computed, diffed against the stored
+state, and only real differences are written (`status_since` keeps the date a status last changed). The delta, the audit rows, the link
+changes and the watermark are applied in **one transaction**.
+
+**Sticky links.** A resolved link is examined again only when one of its records changes; look-alike newcomers compete for unmatched
+items only. This keeps resolved matches stable, at the price of a rare, documented difference from a from-scratch rebuild.
+
+**Audit reasons:** `NEW_ITEM`, `INPUT_CHANGE` (a late or corrected record arrived), `AGED` (SLA elapsed with no input change),
+`RESOLVED` (item closed, e.g. an orphan settlement that got its txn). `as_of` is the latest day ever loaded, so replaying an old day
+cannot rewind the clock.
+
+**Two independent oracles** keep it honest: `reconcile --full` (same code, scope = everything) and the dbt models in
+`dbt/models/reference` (separate SQL). `verify-recon --reference` and the end-to-end test compare all three.
 
 ## Decisions
 
@@ -67,7 +94,7 @@ volume it takes seconds, and it is the only way for a late-arriving gateway reco
 |---|---|---|
 | DuckDB single file | Analytical SQL (windows, `QUALIFY`, `levenshtein`) with ~no idle memory; peak ~430 MB for a daily run | PostgreSQL: a server process for no extra learning |
 | Custom YAML rule engine | Every rule is readable SQL I can explain; row-level quarantine and a score are first-class | Great Expectations: heavier configuration and memory, and it obscures the mechanics for a portfolio piece |
-| dbt for Gold | Reconciliation is SQL-shaped; tests, docs and lineage come with it | Python/pandas joins: harder to test and review |
+| dbt for marts and tests; Python + SQL engine for reconciliation | Marts, tests and lineage suit dbt. The reconciliation needs scope closure, sticky links, an audit diff and one atomic apply, which a dbt incremental model cannot express cleanly. The dbt version is kept as the independent oracle | An all-dbt incremental model |
 | dbt as a subprocess | DuckDB allows one writer process; isolates dbt's global state | In-process `dbtRunner` (tried it: it kept its own DuckDB connection open and broke other connections in the same process) |
 | Prefect (optional) | In-process, no server, retries and state | Airflow: scheduler + webserver + metadata DB is too heavy for 8 GB; described in `cloud_design.md` |
 | Halt = load nothing | Half-loaded batches are harder to reason about than a missed day | Load valid rows anyway and hope |

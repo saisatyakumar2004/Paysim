@@ -54,7 +54,7 @@ with tab_rec:
         daily = q("SELECT * FROM gold.mart_recon_daily ORDER BY event_date")
         status = q("""SELECT status, count(*) AS items, round(sum(money_at_risk), 2) AS money_at_risk
                       FROM gold.fact_reconciliation GROUP BY 1 ORDER BY 2 DESC""")
-        as_of = q("SELECT max(as_of_date) AS d FROM gold.fact_reconciliation")["d"].iloc[0]
+        as_of = q("SELECT as_of_date AS d FROM ops.recon_state WHERE id = 1")["d"].iloc[0]
         dup = q("SELECT coalesce(sum(duplicate_exposure), 0) AS x, count(*) FILTER (WHERE is_duplicate_charge) AS n "
                 "FROM gold.fact_reconciliation")
         c = st.columns(5)
@@ -100,6 +100,21 @@ with tab_exc:
                 params.append(merchant.strip())
             sql += " ORDER BY money_at_risk DESC LIMIT 500"
             st.dataframe(q(sql, tuple(params)), hide_index=True, width="stretch")
+        if table_exists("gold.reconciliation_audit"):
+            with st.expander("Status-change history (audit trail)"):
+                st.caption("Append-only. Every change of a reconciliation item's status, with the reason: NEW_ITEM, "
+                           "INPUT_CHANGE (a late or corrected record arrived), AGED (settlement SLA elapsed), RESOLVED.")
+                reasons = q("SELECT reason, count(*) AS n FROM gold.reconciliation_audit GROUP BY 1 ORDER BY 2 DESC")
+                st.dataframe(reasons, hide_index=True, width="stretch")
+                item = st.text_input("Item id (e.g. TXN:TXN1234567890)", "")
+                if item:
+                    st.dataframe(q("SELECT run_date, as_of_date, change_kind, reason, old_status, new_status, "
+                                   "old_settlement_id, new_settlement_id FROM gold.reconciliation_audit "
+                                   "WHERE item_id = ? ORDER BY audit_id", (item.strip(),)), hide_index=True, width="stretch")
+                else:
+                    st.dataframe(q("SELECT run_date, item_id, change_kind, reason, old_status, new_status "
+                                   "FROM gold.reconciliation_audit WHERE change_kind IN ('STATUS_CHANGE', 'CLOSED') "
+                                   "ORDER BY audit_id DESC LIMIT 200"), hide_index=True, width="stretch")
         st.subheader("Merchants with the highest exposure")
         st.dataframe(q("SELECT merchant_id, name, category, risk_tier, txns, exceptions, exception_rate, "
                        "round(total_exposure, 2) AS exposure FROM gold.mart_merchant_exceptions "
@@ -155,6 +170,13 @@ with tab_pipe:
         st.subheader("Records read / rejected")
         st.line_chart(ordered.set_index("run_date")[["records_read", "records_rejected"]])
         st.dataframe(runs, hide_index=True, width="stretch")
+        rr = q("SELECT run_date, mode, changes_read, items_evaluated, items_changed, items_total, "
+               "round(seconds, 3) AS seconds FROM ops.recon_runs ORDER BY started_at DESC LIMIT 40")
+        if not rr.empty:
+            st.subheader("Reconciliation: items evaluated vs total")
+            st.caption("Incremental runs re-evaluate only what changed (plus items that age past the settlement SLA).")
+            st.line_chart(rr.sort_values("run_date").set_index("run_date")[["items_evaluated", "items_total"]])
+            st.dataframe(rr, hide_index=True, width="stretch")
         st.subheader("Task timings, latest run")
         st.dataframe(q("SELECT task, status, round(duration_s, 2) AS seconds, rows_in, rows_out, rows_rejected, detail "
                        "FROM ops.task_log WHERE run_id = (SELECT arg_max(run_id, started_at) FROM ops.run_log)"),

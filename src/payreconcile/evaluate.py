@@ -98,7 +98,7 @@ def evaluate_all(db_path=None, truth_path=None) -> dict:
     found_orders = con.execute("SELECT order_id FROM gold.fact_reconciliation WHERE status = 'ORDER_WITHOUT_PAYMENT'"
                                ).df()["order_id"]
     eligible = set(con.execute("SELECT order_id FROM silver.orders WHERE cast(created_at AS DATE) + 2 < "
-                               "(SELECT max(as_of_date) FROM gold.fact_reconciliation)").df()["order_id"])
+                               "(SELECT as_of_date FROM ops.recon_state WHERE id = 1)").df()["order_id"])
     no_pay_elig = no_pay & eligible
     report["order_without_payment"] = {"injected_eligible": len(no_pay_elig),
                                        "caught": len(no_pay_elig & set(found_orders)),

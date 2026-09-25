@@ -1,3 +1,6 @@
+{{ config(tags=['reference']) }}
+-- REFERENCE IMPLEMENTATION (full rebuild). The daily pipeline uses the incremental engine in
+-- src/payreconcile/reconcile.py; this model is the independent oracle used by `verify` and the benchmark.
 -- One row per reconciliation item across the three-way match (gateway <-> bank <-> orders).
 --   item_type = txn         a captured gateway movement (payment or refund)
 --   item_type = settlement  bank money that could not be linked to any gateway txn

@@ -14,8 +14,8 @@ data owner can fix and replay, and reconciliation can tell "the bank paid for a 
 quality issue) from a real orphan.
 
 **How is it idempotent?** Bronze partitions are overwritten per `ingest_date`; Silver uses keyed upserts (delete + insert, or "an older
-version never overwrites a newer one" for orders); SCD2 ignores a snapshot older than the current version; the reconciliation is a
-deterministic full rebuild. Tests rerun a day, and replay an old day, and assert Silver counts, status counts and money are unchanged.
+version never overwrites a newer one" for orders); SCD2 ignores a snapshot older than the current version; unchanged rows are not rewritten or re-logged; the reconciliation only writes real
+differences. Tests rerun a day, and replay an old day, and assert Silver counts, status counts and money are unchanged.
 
 **Replaying an old day: what went wrong once?** My first version passed the replayed day as the reconciliation `as_of` date, which moved
 the clock backwards and flipped MISSING items back to PENDING. I found it while measuring memory (I re-ran a day on the real warehouse),
@@ -23,7 +23,7 @@ fixed it (`as_of` = latest day ever loaded) and added a regression test.
 
 **How does incremental loading work?** Orders come from a change log: `updated_at >= min(watermark - 1 day, run day start)` and
 `< run day + 1`. The overlap catches late updates; the `min()` makes replays of old days work. Gateway and settlements are date-partitioned
-files; late-arriving gateway records land in a later file and the upsert plus the full reconciliation rebuild handle them.
+files; late-arriving gateway records land in a later file and the change-log-driven reconciliation picks them up (see below).
 
 **Why does a halted batch load nothing?** A half-loaded day is hard to reason about and hard to replay. The previous good Gold keeps serving,
 the failure is visible in `ops.run_log`, and re-running the day after the fix is safe.
@@ -39,7 +39,44 @@ connections in the same process; a subprocess is isolated and mirrors how an orc
 would change (see `cloud_design.md`) but I have not run them.
 
 **How would you scale it?** Partitioned object storage, a warehouse, block the fuzzy join on merchant and date and run it only over open
-items, make reconciliation incremental with a look-back of SLA + late-arrival window.
+items, partition Silver by date so the remaining scans become bounded look-backs (SLA + late-arrival window). The reconciliation is
+already incremental locally.
+
+## Incremental reconciliation
+
+**Why did you make it incremental?** To bound daily work and to get things a rebuild cannot give: a stable, auditable history of status
+changes and matches that are not silently re-decided when unrelated data arrives. Speed was a hoped-for benefit, and I measured it.
+
+**And did it get faster?** Not much, and I say so. The daily run evaluates about 6k items whether the state holds 29k or 272k (20% -> 2%).
+Versus the same code run from scratch it is 0.7x on a tiny history, 1.2x at 30 days and 1.6x at 90 (0.51 s vs 0.81 s), because DuckDB
+recomputes 272k items in under a second. Versus the old dbt path it is 24-39x, but that includes ~9 s of dbt start-up, so it flatters the
+algorithm. End to end, the 30-day backfill took 385 s versus 388 s, since the daily dbt run dominates. I would not extrapolate past the
+272k items I measured.
+
+**How do you know it is correct?** Three implementations must agree: the incremental state, the engine's own full mode, and a separate
+dbt SQL model. After 30 and 90 days there are 0 differences. Twenty unit tests cover late settlements, late refunds, orphans, corrected
+amounts, sticky and ambiguous matches, quarantine and order dependencies, the audit trail, crash safety and idempotency. I also broke
+the scoping, aging and stickiness logic on purpose to confirm tests fail (three of four mutants were caught; the fourth was equivalent
+because closure already covered it).
+
+**How does it find what to re-evaluate?** Silver upserts log every new or changed key to a change log (plus the old value of the order id
+or bank reference of a replaced row); quarantine changes are logged too. The scope is those keys, closed over their dependencies (match
+partner, refunds that reference them, siblings on the same order, order items), plus items that change with time (PENDING past the SLA,
+orders that just became old enough to judge), plus unmatched records that could fuzzy-compete with a scoped one.
+
+**What is a sticky match and why?** A resolved link is only re-examined when one of its records changes. Otherwise a look-alike
+transaction arriving next week could silently un-match money that finance already signed off. The cost is a rare difference from a
+rebuild in ambiguous fuzzy cases; a test pins it down and `verify-recon` reports it.
+
+**How is the audit trail guaranteed?** The item diff, audit rows, link changes and the change-log watermark are written in one
+transaction, so a crash leaves the old state and a rerun redoes the same work. The audit table is append-only, records the reason
+(`NEW_ITEM`, `INPUT_CHANGE`, `AGED`, `RESOLVED`), and a dbt test asserts the last row per item explains the current status.
+
+**A refund arrives after the original was resolved. What happens?** Only the refund's item is evaluated. The original keeps its row,
+run id and audit history (tested).
+
+**What would you do next?** Partition Silver by date so scans are bounded look-backs, then re-benchmark at 10-100x the data. I would
+not claim a speedup at scale before measuring it.
 
 ## SQL (all in `dbt/models` and `src/payreconcile/silver.py`)
 * **Fuzzy match with uniqueness:** candidates joined on merchant, amount and date window, `levenshtein <= 2`, then
@@ -77,14 +114,20 @@ refresh if the latest run was halted by the gate.
 * `replay` re-evaluates quarantined rows after reference data or a rule changes (e.g. a merchant onboarded late).
 * Gateway "API" is a file-based stand-in; retries are tested with injected failures, not a real network.
 * No PII handling, auth, encryption or cloud deployment.
-* Reconciliation is a full rebuild; fine at this size, not at 1000x.
+* The incremental reconciliation's measured wall-clock gain over a full in-process rebuild is small at this size (1.2x at 30 days, 1.6x
+  at 90) and end-to-end daily runtime did not improve (dbt dominates); its value here is bounded work, stable matches, an audit trail
+  and safe reruns. Its runtime still creeps up with history because some statements scan whole tables.
+* Sticky matches can differ from a from-scratch rebuild in rare ambiguous fuzzy cases (documented and tested).
 
 ## Resume bullets (numbers are measured; keep the "synthetic" qualifier)
 **Data Engineer**
 * Built a Bronze/Silver/Gold payments-reconciliation pipeline (Python, DuckDB, dbt, Parquet) over 3 sources with a schema-contract check,
   YAML-driven quality rules, a quarantine table and a quality gate that halts bad batches before they reach the warehouse or model.
 * Implemented incremental, idempotent loads (watermark with overlap, keyed upserts, SCD2 merchant dimension) verified by tests that replay
-  days; 42 automated tests plus 44 dbt tests run on every push in GitHub Actions.
+  days; 65 automated tests plus 45 dbt tests run on every push in GitHub Actions.
+* Built an incremental reconciliation engine (change-log scope, sticky matches, one-transaction apply, append-only audit trail) that
+  re-evaluates 2-7% of state items per run and matches a from-scratch rebuild exactly (0 differences over 272,509 items, checked against
+  two independent implementations); measured 1.6x faster than a full in-process rebuild at 90 days (see the honest caveats).
 * Scored the pipeline against a seeded answer key: 100% recall and precision on 3,733 injected bad rows and 100% reconciliation-status accuracy on
   ~87k synthetic transactions (self-consistency check on synthetic data).
 

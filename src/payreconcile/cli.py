@@ -41,6 +41,11 @@ def main(argv: list[str] | None = None) -> int:
     rp.add_argument("--date", type=_d, required=True)
     rp.add_argument("--no-dbt", action="store_true")
 
+    rc = sub.add_parser("reconcile", help="run reconciliation on its own (incremental by default)")
+    rc.add_argument("--full", action="store_true", help="recompute every item from scratch (recovery)")
+    vr = sub.add_parser("verify-recon", help="check incremental state against a from-scratch rebuild")
+    vr.add_argument("--reference", action="store_true", help="also compare with the independent dbt reference model")
+
     sub.add_parser("evaluate", help="score pipeline output against the generator's ground truth")
     sub.add_parser("anomalies", help="train + score the merchant-day anomaly model on trusted data")
     sub.add_parser("reset", help="delete the warehouse and bronze layers (keeps source data)")
@@ -71,6 +76,26 @@ def main(argv: list[str] | None = None) -> int:
     elif args.cmd == "replay":
         from .replay import replay
         print(json.dumps(replay(args.dataset, args.date, run_dbt=not args.no_dbt), indent=2))
+    elif args.cmd == "reconcile":
+        from . import db, reconcile
+        con = db.connect()
+        as_of = con.execute("SELECT coalesce(max(as_of_date), max(run_date)) FROM (SELECT as_of_date, NULL AS run_date "
+                            "FROM ops.recon_state UNION ALL SELECT NULL, max(run_date) FROM ops.run_log)").fetchone()[0]
+        print(json.dumps(reconcile.reconcile(con, as_of, "cli", full=args.full).__dict__, indent=2, default=str))
+        con.close()
+    elif args.cmd == "verify-recon":
+        from . import db, reconcile, transform
+        con = db.connect()
+        out = {"vs_full_recompute": reconcile.verify(con)}
+        if args.reference:
+            as_of = con.execute("SELECT as_of_date FROM ops.recon_state WHERE id = 1").fetchone()[0]
+            con.close()
+            res = transform.build(as_of, reference=True)
+            con = db.connect()
+            out["reference_build"] = {"success": res.success, "failures": res.failures}
+            out["vs_dbt_reference"] = reconcile.compare_with_reference(con)
+        con.close()
+        print(json.dumps(out, indent=2, default=str))
     elif args.cmd == "evaluate":
         from .evaluate import evaluate_all, print_report
         print_report(evaluate_all())

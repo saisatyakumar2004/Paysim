@@ -24,3 +24,31 @@ sources:
     schema: quarantine
     tables:
       - name: rows
+  - name: recon
+    schema: gold
+    description: Reconciliation state maintained incrementally by payreconcile.reconcile (not built by dbt).
+    tables:
+      - name: fact_reconciliation
+        description: One row per reconciliation item (txn, settlement or order).
+        columns:
+          - name: item_id
+            data_tests: [unique, not_null]
+          - name: status
+            data_tests:
+              - not_null
+              - accepted_values:
+                  arguments:
+                    values: [MATCHED, AMOUNT_MISMATCH, MISSING_SETTLEMENT, PENDING, ORPHAN_REFUND, ORPHAN_SETTLEMENT,
+                             SETTLED_NOT_CAPTURED, SOURCE_QUARANTINED, ORDER_WITHOUT_PAYMENT, PAYMENT_QUARANTINED]
+          - name: money_at_risk
+            data_tests: [not_null]
+      - name: recon_links
+        columns:
+          - name: txn_id
+            data_tests: [unique, not_null]
+          - name: settlement_id
+            data_tests: [unique, not_null]
+      - name: reconciliation_audit
+        columns:
+          - name: audit_id
+            data_tests: [unique, not_null]

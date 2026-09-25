@@ -35,15 +35,19 @@ def _recon_vars() -> dict:
             "dup_window_minutes": r["duplicate_charge_window_minutes"]}
 
 
-def build(as_of: date, select: str | None = None) -> DbtResult:
+def build(as_of: date, select: str | None = None, reference: bool = False) -> DbtResult:
     """`dbt build` = run models + run tests, in dependency order. A failing test skips downstream models."""
     target = config.data_dir() / "dbt_target"
     cmd = [sys.executable, "-c", _LAUNCH, "build", "--project-dir", str(config.DBT_DIR),
            "--profiles-dir", str(config.DBT_DIR), "--target-path", str(target),
            "--log-path", str(config.data_dir() / "dbt_logs"), "--quiet",
            "--vars", json.dumps({"as_of_date": as_of.isoformat(), **_recon_vars()})]
-    if select:
-        cmd += ["--select", select]
+    if reference:                       # the independent full-rebuild oracle (int_* models + recon_full_rebuild)
+        cmd += ["--select", "tag:reference"]
+    else:
+        cmd += ["--exclude", "tag:reference"]
+        if select:
+            cmd += ["--select", select]
     run_results = target / "run_results.json"
     run_results.unlink(missing_ok=True)
     proc = subprocess.run(cmd, capture_output=True, text=True, env={**os.environ, "PAYRECON_DB": str(config.warehouse_path())})

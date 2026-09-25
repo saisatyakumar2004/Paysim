@@ -12,7 +12,7 @@ select
     s.net_amount,
     s.net_consistent
 from {{ source('silver', 'settlements') }} s
-left join {{ ref('int_txn_settlement_links') }} l on l.settlement_id = s.settlement_id
+left join {{ source('recon', 'recon_links') }} l on l.settlement_id = s.settlement_id
 left join {{ ref('dim_merchant') }} m
   on m.merchant_id = s.merchant_id
  and s.settlement_date >= m.valid_from

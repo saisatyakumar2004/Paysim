@@ -15,6 +15,6 @@ select
           nullif(count(*) filter (where item_type = 'txn' and status not in ('PENDING', 'ORPHAN_REFUND')), 0), 4) as match_rate,
     round(sum(money_at_risk), 2) as money_at_risk,
     round(sum(duplicate_exposure), 2) as duplicate_exposure
-from {{ ref('fact_reconciliation') }}
+from {{ source('recon', 'fact_reconciliation') }}
 group by event_date
 order by event_date

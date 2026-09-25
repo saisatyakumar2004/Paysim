@@ -16,7 +16,7 @@ from datetime import date, datetime, timedelta
 
 import pandas as pd
 
-from . import db, dq, ingest, silver, transform
+from . import db, dq, ingest, quarantine, reconcile, silver, transform
 
 log = logging.getLogger("payreconcile.pipeline")
 
@@ -166,11 +166,19 @@ def run_day(run_date: date, run_dbt: bool = True, gateway_client: ingest.Gateway
                 rec["rows_out"] = written
                 summary.rows_written = written
 
-            # ---- gold (dbt) ------------------------------------------------------------------------------
+            # ---- reconciliation (incremental) --------------------------------------------------------------
+            # A replay of an old day must not rewind the reconciliation clock: as-of = latest day ever loaded.
+            latest = con.execute("SELECT max(run_date) FROM ops.run_log WHERE status LIKE 'SUCCESS%'").fetchone()[0]
+            as_of = max(run_date, latest) if latest else run_date
+            with tasks.task("reconcile") as rec:
+                rs = reconcile.reconcile(con, as_of, run_id, run_date)
+                rec["rows_in"], rec["rows_out"] = rs.items_evaluated, rs.items_changed
+                rec["detail"] = (f"mode={rs.mode} changes={rs.changes_read} scope(txn/stl/ord)="
+                                 f"{rs.scope_txns}/{rs.scope_settlements}/{rs.scope_orders} "
+                                 f"evaluated={rs.items_evaluated}/{rs.items_total} changed={rs.items_changed}")
+
+            # ---- gold marts + tests (dbt) -----------------------------------------------------------------------
             if run_dbt:
-                # A replay of an old day must not rewind the reconciliation clock: as-of = latest day ever loaded.
-                latest = con.execute("SELECT max(run_date) FROM ops.run_log WHERE status LIKE 'SUCCESS%'").fetchone()[0]
-                as_of = max(run_date, latest) if latest else run_date
                 con.close()
                 with _closed_task(run_id, run_date, "dbt_build") as rec:
                     summary.dbt = transform.build(as_of)
@@ -242,7 +250,6 @@ def _stat_history(con, dataset: str, metric: str, before: date) -> list[float]:
 
 def _persist_quality(con, run_id: str, run_date: date, results: dict[str, dq.DQResult],
                      extra: list[dq.RuleResult], loaded: bool) -> None:
-    now = datetime.now()
     for name, res in results.items():
         for r in res.rule_results:
             con.execute("INSERT INTO ops.dq_results VALUES (?,?,?,?,?,?,?,?,?,?,?)", [
@@ -250,20 +257,7 @@ def _persist_quality(con, run_id: str, run_date: date, results: dict[str, dq.DQR
                 r.ratio, r.status, r.action])
         con.execute("INSERT INTO ops.dq_scores VALUES (?,?,?,?,?,?,?,?)", [
             run_id, run_date, name, res.score, res.status, res.rows_in, res.rows_quarantined, loaded])
-        con.execute("DELETE FROM quarantine.rows WHERE run_date = ? AND dataset = ?", [run_date, name])
-        q = res.quarantined
-        if q is not None and len(q):
-            qdf = q.copy()
-            qdf.insert(0, "run_id", run_id)
-            qdf.insert(1, "run_date", run_date)
-            qdf.insert(2, "dataset", name)
-            qdf["reason"] = qdf["rule_ids"]
-            qdf["quarantined_at"] = now
-            qdf = qdf[["run_id", "run_date", "dataset", "natural_key", "order_id", "rule_ids", "reason", "raw_json",
-                       "quarantined_at"]]
-            con.register("qdf", qdf)
-            con.execute("INSERT INTO quarantine.rows SELECT * FROM qdf")
-            con.unregister("qdf")
+        quarantine.replace(con, run_id, run_date, name, res.quarantined)
     for x in extra:
         con.execute("INSERT INTO ops.dq_results VALUES (?,?,?,?,?,?,?,?,?,?,?)", [
             run_id, run_date, x.dataset, x.rule_id, x.severity, x.description, x.evaluated, x.violations,

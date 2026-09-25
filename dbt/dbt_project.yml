@@ -18,3 +18,5 @@ models:
   payreconcile:
     +materialized: table
     +schema: gold
+    intermediate:
+      +tags: ['reference']

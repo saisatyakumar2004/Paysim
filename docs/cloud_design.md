@@ -22,8 +22,9 @@
 ## What changes when data is bigger than one machine
 * The **fuzzy matching join** is the expensive step (merchant x amount x date window x edit distance). It is blocked on merchant and date,
   so it partitions naturally; in a warehouse it should be its own incremental model over only unmatched, recent items.
-* Reconciliation becomes **incremental**: only open items (PENDING / unmatched) plus newly arrived rows are re-evaluated, with a
-  bounded look-back equal to the settlement SLA plus the late-arrival window.
+* Reconciliation is already **incremental** locally (change-log driven, sticky links, audit table). In a warehouse the change log would
+  be a table stream or `MERGE` output, and Silver would be partitioned by date so the remaining full-table scans become bounded
+  look-backs (SLA plus late-arrival window). That partitioning is the next step and is **not implemented**.
 * **Secrets, IAM, encryption at rest, PII handling:** none of this exists locally. Payments data carries account-level risk; a real
   deployment needs a data-classification review, tokenised identifiers and column-level access before anything else.
 * **Exactly-once ingestion** would rely on idempotent keys (`txn_id`, `settlement_id`) plus a load ledger, as it does locally.

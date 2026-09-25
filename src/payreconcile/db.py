@@ -57,6 +57,35 @@ CREATE TABLE IF NOT EXISTS ops.batch_stats (
     run_id VARCHAR, run_date DATE, dataset VARCHAR, metric VARCHAR, value DOUBLE, loaded BOOLEAN);
 CREATE TABLE IF NOT EXISTS ops.model_metrics (
     run_ts TIMESTAMP, model VARCHAR, metric VARCHAR, value DOUBLE, detail VARCHAR);
+CREATE SEQUENCE IF NOT EXISTS ops.change_seq START 1;
+CREATE SEQUENCE IF NOT EXISTS gold.audit_seq START 1;
+
+-- Every new/changed Silver row and every quarantine change is recorded here; incremental reconciliation reads it.
+CREATE TABLE IF NOT EXISTS ops.change_log (
+    seq BIGINT DEFAULT nextval('ops.change_seq'), dataset VARCHAR, key VARCHAR, aux VARCHAR,
+    run_id VARCHAR, changed_at TIMESTAMP);
+CREATE TABLE IF NOT EXISTS ops.recon_state (
+    id INTEGER, last_seq BIGINT, as_of_date DATE, updated_at TIMESTAMP);
+CREATE TABLE IF NOT EXISTS ops.recon_runs (
+    run_id VARCHAR, run_date DATE, mode VARCHAR, as_of_date DATE, changes_read BIGINT, scope_txns BIGINT,
+    scope_settlements BIGINT, scope_orders BIGINT, items_total BIGINT, items_evaluated BIGINT, items_changed BIGINT,
+    seconds DOUBLE, started_at TIMESTAMP);
+
+-- Reconciliation state (owned by payreconcile.reconcile; dbt reads these as sources).
+CREATE TABLE IF NOT EXISTS gold.fact_reconciliation (
+    item_id VARCHAR, item_type VARCHAR, txn_id VARCHAR, settlement_id VARCHAR, order_id VARCHAR, merchant_id VARCHAR,
+    event_date DATE, expected_amount DOUBLE, settled_amount DOUBLE, diff_amount DOUBLE, status VARCHAR,
+    match_method VARCHAR, is_duplicate_charge BOOLEAN, duplicate_exposure DOUBLE, order_issue VARCHAR,
+    money_at_risk DOUBLE, status_since DATE, updated_run_id VARCHAR);
+CREATE TABLE IF NOT EXISTS gold.recon_links (
+    txn_id VARCHAR, settlement_id VARCHAR, match_method VARCHAR, edit_distance INTEGER);
+-- Append-only history of every reconciliation status change. Never updated or deleted.
+CREATE TABLE IF NOT EXISTS gold.reconciliation_audit (
+    audit_id BIGINT DEFAULT nextval('gold.audit_seq'), run_id VARCHAR, run_date DATE, as_of_date DATE,
+    item_id VARCHAR, item_type VARCHAR, change_kind VARCHAR, reason VARCHAR,
+    old_status VARCHAR, new_status VARCHAR, old_settlement_id VARCHAR, new_settlement_id VARCHAR,
+    old_money_at_risk DOUBLE, new_money_at_risk DOUBLE, changed_at TIMESTAMP);
+
 CREATE TABLE IF NOT EXISTS ops.watermarks (dataset VARCHAR PRIMARY KEY, watermark TIMESTAMP);
 """
 

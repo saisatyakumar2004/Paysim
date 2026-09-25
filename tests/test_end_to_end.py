@@ -7,7 +7,7 @@ from datetime import date, timedelta
 import duckdb
 import pytest
 
-from payreconcile import config, ingest, pipeline
+from payreconcile import config, db, ingest, pipeline, reconcile, transform
 from payreconcile.evaluate import evaluate_all
 from payreconcile.generate import GenConfig, generate
 
@@ -63,6 +63,41 @@ def test_reconciliation_agrees_with_ground_truth(platform):
     assert report["fuzzy_match"]["fp"] == 0                    # ambiguity must never produce a wrong link
 
 
+def test_incremental_reconciliation_equals_a_full_rebuild_and_the_dbt_reference(platform):
+    """Ten days of incremental updates must land on exactly the state a from-scratch rebuild produces, computed two
+    independent ways: the engine's own full mode and the separate dbt reference model."""
+    con = db.connect()
+    assert reconcile.verify(con) == {**reconcile.verify(con), "ok": True, "differ_in_state": 0, "differ_in_full_rebuild": 0}
+    con.close()
+    res = transform.build(LAST, reference=True)
+    assert res.success, res.failures
+    con = db.connect()
+    cmp = reconcile.compare_with_reference(con)
+    con.close()
+    assert cmp["ok"], cmp
+    assert cmp["state_items"] > 1000
+
+
+def test_incremental_runs_evaluate_only_part_of_the_state(platform):
+    con = duckdb.connect(str(platform["root"] / "warehouse.duckdb"), read_only=True)
+    rows = con.execute("SELECT mode, items_evaluated, items_total FROM ops.recon_runs ORDER BY started_at").fetchall()
+    con.close()
+    assert rows[0][0] == "full" and all(r[0] == "incremental" for r in rows[1:])
+    late = rows[-1]
+    assert late[1] < 0.6 * late[2], f"day {DAYS} evaluated {late[1]} of {late[2]} items"
+
+
+def test_audit_trail_explains_the_final_state(platform):
+    con = duckdb.connect(str(platform["root"] / "warehouse.duckdb"), read_only=True)
+    last = dict(con.execute("SELECT item_id, arg_max(new_status, audit_id) FROM gold.reconciliation_audit "
+                            "GROUP BY item_id").fetchall())
+    state = dict(con.execute("SELECT item_id, status FROM gold.fact_reconciliation").fetchall())
+    n_changes = con.execute("SELECT count(*) FROM gold.reconciliation_audit WHERE change_kind = 'STATUS_CHANGE'").fetchone()[0]
+    con.close()
+    assert {k: v for k, v in last.items() if v != "CLOSED"} == state
+    assert n_changes > 0                       # statuses genuinely moved (pending -> matched/missing, orphans resolved)
+
+
 def test_no_quarantined_transaction_reaches_gold(platform):
     con = duckdb.connect(str(platform["root"] / "warehouse.duckdb"), read_only=True)
     leaked = con.execute("""SELECT count(*) FROM quarantine.rows q JOIN gold.fact_transactions f
@@ -85,7 +120,7 @@ def test_replaying_an_old_day_does_not_rewind_the_reconciliation_clock(platform)
     assert r.status in ("SUCCESS", "SUCCESS_WITH_WARNINGS")
     assert snapshot(platform["root"]) == before
     con = duckdb.connect(str(platform["root"] / "warehouse.duckdb"), read_only=True)
-    assert con.execute("SELECT max(as_of_date) FROM gold.fact_reconciliation").fetchone()[0] == LAST
+    assert con.execute("SELECT as_of_date FROM ops.recon_state WHERE id = 1").fetchone()[0] == LAST
     con.close()
 
 
