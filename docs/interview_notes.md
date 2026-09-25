@@ -71,8 +71,10 @@ refresh if the latest run was halted by the gate.
 ## Limitations I would volunteer
 * Synthetic data whose defect types match the rules I wrote. The 100% status accuracy proves the logic is self-consistent, not that it
   works on real feeds. Real data would need iteration with the data owners.
-* Two known misses: 18 duplicate charges (their original payment was itself quarantined, so nothing to pair with) and one transaction
-  quarantined because a duplicate charge crossed midnight and its timestamp fell after its batch date.
+* One known miss: 17 duplicate charges are not found (their original payment was itself quarantined, so nothing to pair with).
+* A valid duplicate charge that crossed midnight was quarantined by my first version of the timestamp rule; I added a 24h tolerance and
+  the false positive disappeared (precision 99.97% -> 100%).
+* `replay` re-evaluates quarantined rows after reference data or a rule changes (e.g. a merchant onboarded late).
 * Gateway "API" is a file-based stand-in; retries are tested with injected failures, not a real network.
 * No PII handling, auth, encryption or cloud deployment.
 * Reconciliation is a full rebuild; fine at this size, not at 1000x.
@@ -82,8 +84,8 @@ refresh if the latest run was halted by the gate.
 * Built a Bronze/Silver/Gold payments-reconciliation pipeline (Python, DuckDB, dbt, Parquet) over 3 sources with a schema-contract check,
   YAML-driven quality rules, a quarantine table and a quality gate that halts bad batches before they reach the warehouse or model.
 * Implemented incremental, idempotent loads (watermark with overlap, keyed upserts, SCD2 merchant dimension) verified by tests that replay
-  days; 41 automated tests plus 44 dbt tests run on every push in GitHub Actions.
-* Scored the pipeline against a seeded answer key: 100% recall on 3,733 injected bad rows and 100% reconciliation-status accuracy on
+  days; 42 automated tests plus 44 dbt tests run on every push in GitHub Actions.
+* Scored the pipeline against a seeded answer key: 100% recall and precision on 3,733 injected bad rows and 100% reconciliation-status accuracy on
   ~87k synthetic transactions (self-consistency check on synthetic data).
 
 **Data Analyst**

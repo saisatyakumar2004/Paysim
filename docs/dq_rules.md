@@ -21,7 +21,7 @@ Payment-gateway transactions (paginated JSON API). Dataset weight in the overall
 | `GW-CMP-02` | ERROR | order_id | order_id present (payment traceable to an order) | NULL or blank | quarantine |
 | `GW-CMP-03` | ERROR | merchant_id | merchant_id present | NULL or blank | quarantine |
 | `GW-UNQ-01` | ERROR | txn_id | txn_id unique within the batch (duplicate webhook) | second and later occurrences of the key in the batch | quarantine |
-| `GW-VAL-01` | ERROR |  | created_at parses and lies in [2020-01-01, run_date+1) | `pr_ts(created_at) IS NULL OR pr_ts(created_at) < TIMESTAMP '2020-01-01' OR pr_ts(created_at) >= TIMESTAMP '$run_date_next'` | quarantine |
+| `GW-VAL-01` | ERROR |  | created_at parses and lies in [2020-01-01, run_date+2) (24h tolerance for events straddling midnight) | `pr_ts(created_at) IS NULL OR pr_ts(created_at) < TIMESTAMP '2020-01-01' OR pr_ts(created_at) >= TIMESTAMP '$run_date_grace'` | quarantine |
 | `GW-VAL-02` | ERROR |  | amount is numeric | `pr_amt(amount) IS NULL` | quarantine |
 | `GW-VAL-03` | ERROR |  | amount > 0 | `pr_amt(amount) <= 0` | quarantine |
 | `GW-VAL-04` | ERROR | status | status in allowed set | value not in ['captured', 'failed', 'pending'] | quarantine |

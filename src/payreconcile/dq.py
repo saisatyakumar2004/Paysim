@@ -148,7 +148,8 @@ def evaluate(con, contract: dict, df: pd.DataFrame, run_date: date) -> DQResult:
     df.insert(0, "_rid", range(len(df)))
     n = len(df)
     con.register("t", df)
-    ctx = {"run_date": run_date.isoformat(), "run_date_next": (run_date + timedelta(days=1)).isoformat()}
+    ctx = {"run_date": run_date.isoformat(), "run_date_next": (run_date + timedelta(days=1)).isoformat(),
+           "run_date_grace": (run_date + timedelta(days=2)).isoformat()}   # +24h tolerance for events straddling midnight
     bad: dict[int, list[str]] = {}
     for rule in contract["rules"]:
         sev = rule["severity"]

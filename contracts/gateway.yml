@@ -13,8 +13,8 @@ rules:
   - id: GW-VAL-01
     type: expr
     severity: ERROR
-    desc: "created_at parses and lies in [2020-01-01, run_date+1)"
-    violation: "pr_ts(created_at) IS NULL OR pr_ts(created_at) < TIMESTAMP '2020-01-01' OR pr_ts(created_at) >= TIMESTAMP '$run_date_next'"
+    desc: "created_at parses and lies in [2020-01-01, run_date+2) (24h tolerance for events straddling midnight)"
+    violation: "pr_ts(created_at) IS NULL OR pr_ts(created_at) < TIMESTAMP '2020-01-01' OR pr_ts(created_at) >= TIMESTAMP '$run_date_grace'"
   - {id: GW-VAL-02, type: expr, severity: ERROR, desc: "amount is numeric", violation: "pr_amt(amount) IS NULL"}
   - {id: GW-VAL-03, type: expr, severity: ERROR, desc: "amount > 0", violation: "pr_amt(amount) <= 0"}
   - {id: GW-VAL-04, type: accepted, column: status, values: [captured, failed, pending], severity: ERROR, desc: "status in allowed set"}

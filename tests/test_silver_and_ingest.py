@@ -109,3 +109,28 @@ def test_bronze_partition_is_overwritten_not_appended(data_dir):
     path = ingest.write_bronze("gateway", date(2026, 1, 2), df.iloc[:1], "run2", "src")
     out = pd.read_parquet(path)
     assert len(out) == 1 and out["_run_id"].iloc[0] == "run2"
+
+
+# ---- quarantine replay ----------------------------------------------------------------------------------
+def test_replay_releases_rows_that_now_pass_and_keeps_the_rest(con, data_dir):
+    from payreconcile import replay
+    rows = [gw_row(txn_id="T1", order_id="O1", merchant_id="M9"),                    # merchant onboarded later
+            gw_row(txn_id="T2", order_id="O2", amount="-5")]                          # still invalid
+    for r in rows:
+        con.execute("INSERT INTO quarantine.rows VALUES ('r0', DATE '2026-01-02', 'gateway', ?, ?, 'X', 'X', ?, now())",
+                    [r["txn_id"], r["order_id"], json.dumps(r)])
+    con.execute("""INSERT INTO silver.merchants_scd2 VALUES ('M9', 'New', 'food', 'Pune', 'low', 2.0,
+                   DATE '2026-01-01', DATE '9999-12-31', true, 'h', 'seed')""")
+    con.close()
+    out = replay.replay("gateway", date(2026, 1, 2), run_dbt=False)
+    assert out["candidates"] == 2 and out["released"] == 1 and out["still_quarantined"] == 1
+    c = duckdb_connect(data_dir)
+    assert [r[0] for r in c.execute("SELECT txn_id FROM silver.gateway_txns").fetchall()] == ["T1"]
+    left = c.execute("SELECT natural_key, rule_ids FROM quarantine.rows").fetchall()
+    assert left == [("T2", "GW-VAL-03")]
+    c.close()
+
+
+def duckdb_connect(data_dir):
+    from payreconcile import db
+    return db.connect()

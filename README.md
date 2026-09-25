@@ -50,9 +50,9 @@ Raw output: [`docs/results_evaluation.txt`](docs/results_evaluation.txt), [`resu
 
 | Question | Result |
 |---|---|
-| Bad rows quarantined vs injected | recall 100% (3,733 / 3,733), precision 99.97% (1 extra) |
+| Bad rows quarantined vs injected | recall 100% (3,733 / 3,733), precision 100% |
 | Reconciliation status vs ground truth (~87k txns) | 100% accuracy; fuzzy matches 906 found, 0 wrong |
-| Duplicate charges | precision 100%, recall 97.4% (18 missed, see Limitations) |
+| Duplicate charges | precision 100%, recall 97.6% (17 missed, see Limitations) |
 | Orphan settlements | precision 100%, recall 100% |
 | Money at risk found (INR, synthetic) | 2.58 M across 5 exception types (+ 0.74 M duplicate-charge exposure) |
 | Anomaly detection (4,600 merchant-days, 30 injected) | Isolation Forest P 0.43 / R 0.67; simple z >= 4 rule P 0.61 / R 1.00 |
@@ -81,9 +81,10 @@ python -m payreconcile generate --days 30                    # ~1 min, writes da
 python -m payreconcile backfill --start 2026-01-01 --end 2026-01-30    # ~6.5 min; add --no-dbt for a fast Silver-only run
 python -m payreconcile evaluate                              # score against the ground truth
 python -m payreconcile anomalies                             # fraud-signal model
+python -m payreconcile replay --dataset gateway --date 2026-01-05   # re-check quarantined rows against current rules/reference data
 streamlit run dashboard/app.py                               # dashboards
 python scripts/demo_poisoned_batch.py                        # bad batch with and without the gate
-pytest                                                       # 41 tests incl. end-to-end (~3 min)
+pytest                                                       # 42 tests incl. end-to-end (~3 min)
 ```
 
 Optional Prefect run (no server needed): `python -m payreconcile backfill --prefect --start ... --end ...`.
@@ -116,8 +117,7 @@ docs/             architecture, rule catalogue, cloud design, interview notes, m
 ## Limitations
 
 * **Synthetic data**, with defect types that match the rules; real feeds would need iteration and would surface cases I did not think of.
-* **Two known misses.** 18 duplicate charges are not found because their original payment was itself quarantined. One valid duplicate
-  charge is quarantined because it crossed midnight and its timestamp fell after its batch date (a boundary the rule could tolerate).
+* **One known miss.** 17 duplicate charges are not found because their original payment was itself quarantined, so there is nothing to pair with.
 * The gateway "API" is a file-based stand-in; retry logic is tested with injected failures, not a real network.
 * The reconciliation is a **full rebuild** each run: right at this size (seconds), not at 1000x.
 * Isolation Forest did not beat a simple rule here; the injected anomalies are big and synthetic.
@@ -125,5 +125,5 @@ docs/             architecture, rule catalogue, cloud design, interview notes, m
 * No screenshots are committed; run the dashboard to see it.
 
 ## Future work
-Incremental reconciliation over open items only; a quarantine replay command; alerting hooks; deployment to one cloud to turn the
+Incremental reconciliation over open items only; alerting hooks; deployment to one cloud to turn the
 design document into implemented experience.

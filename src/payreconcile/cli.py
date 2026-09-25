@@ -36,6 +36,11 @@ def main(argv: list[str] | None = None) -> int:
     b.add_argument("--no-dbt", action="store_true")
     b.add_argument("--prefect", action="store_true", help="run via the Prefect flow")
 
+    rp = sub.add_parser("replay", help="re-evaluate quarantined rows against current rules/reference data")
+    rp.add_argument("--dataset", required=True, choices=["gateway", "orders", "settlements"])
+    rp.add_argument("--date", type=_d, required=True)
+    rp.add_argument("--no-dbt", action="store_true")
+
     sub.add_parser("evaluate", help="score pipeline output against the generator's ground truth")
     sub.add_parser("anomalies", help="train + score the merchant-day anomaly model on trusted data")
     sub.add_parser("reset", help="delete the warehouse and bronze layers (keeps source data)")
@@ -63,6 +68,9 @@ def main(argv: list[str] | None = None) -> int:
             while d <= args.end:
                 print(_fmt(run_day(d, run_dbt=not args.no_dbt)), flush=True)
                 d += timedelta(days=1)
+    elif args.cmd == "replay":
+        from .replay import replay
+        print(json.dumps(replay(args.dataset, args.date, run_dbt=not args.no_dbt), indent=2))
     elif args.cmd == "evaluate":
         from .evaluate import evaluate_all, print_report
         print_report(evaluate_all())

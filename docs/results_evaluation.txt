@@ -1,6 +1,6 @@
 
 DATA QUALITY (quarantine vs injected defects)
-  quarantine (all datasets)          precision=0.9997  recall=1.0  (tp=3733 fp=1 fn=0)
+  quarantine (all datasets)          precision=1.0  recall=1.0  (tp=3733 fp=0 fn=0)
     amount_na          injected=177   caught=177   recall=1.0
     amount_negative    injected=261   caught=261   recall=1.0
     bad_date           injected=344   caught=344   recall=1.0
@@ -15,16 +15,16 @@ DATA QUALITY (quarantine vs injected defects)
   repairs reported {'GW-FIX-02': 2531, 'GW-FIX-01': 1022}  vs injected {'alt_date_format': 2531, 'amount_symbol': 845}
 
 RECONCILIATION
-  txn population {'truth_txns': 86973, 'found_in_gold': 86972}  status accuracy = 1.0
+  txn population {'truth_txns': 86973, 'found_in_gold': 86973}  status accuracy = 1.0
   AMOUNT_MISMATCH                    precision=1.0  recall=1.0  (tp=1273 fp=0 fn=0)
-  MATCHED                            precision=1.0  recall=1.0  (tp=80608 fp=0 fn=1)
+  MATCHED                            precision=1.0  recall=1.0  (tp=80609 fp=0 fn=0)
   MISSING_SETTLEMENT                 precision=1.0  recall=1.0  (tp=1100 fp=0 fn=0)
   ORPHAN_REFUND                      precision=1.0  recall=1.0  (tp=59 fp=0 fn=0)
   PENDING                            precision=1.0  recall=1.0  (tp=3932 fp=0 fn=0)
   fuzzy matches                      precision=1.0  recall=1.0  (tp=906 fp=0 fn=0)
-  duplicate charges                  precision=1.0  recall=0.9741  (tp=676 fp=0 fn=18)
+  duplicate charges                  precision=1.0  recall=0.9755  (tp=677 fp=0 fn=17)
   orphan settlements                 precision=1.0  recall=1.0  (tp=335 fp=0 fn=0)
-  settlements of quarantined txns    precision=0.9995  recall=1.0  (tp=1833 fp=1 fn=0)
+  settlements of quarantined txns    precision=1.0  recall=1.0  (tp=1833 fp=0 fn=0)
   order without payment: {'injected_eligible': 407, 'caught': 407, 'recall': 1.0}
   payment without order: {'injected': 609, 'flagged': 597, 'recall': 0.9803}
 
