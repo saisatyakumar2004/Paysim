@@ -6,6 +6,15 @@ expanding baseline (previous days only, so there is no look-ahead leakage).
 
 Trust boundary: features are built from Silver (rows that passed data quality) and the model refuses to run
 if the most recent pipeline run was stopped by the quality gate.
+
+Leakage controls (each is covered by tests/test_anomaly_leakage.py)
+  * prediction time   the end of the merchant-day being scored;
+  * feature cutoff    a day's baseline uses previous days only (expanding mean/std shifted by one);
+  * inputs            gateway transactions only: no settlement, reconciliation status, order or label is read;
+  * labels            the ground truth is read only AFTER scoring, to evaluate; it never reaches scoring;
+  * split             the model is unsupervised (Isolation Forest) and the baseline is a fixed rule, so there is no
+                      train/test split to leak across; evaluation is against injected labels on the same merchant-days.
+The injected anomalies are synthetic: results show the method works on them, not that it detects real fraud.
 """
 
 from __future__ import annotations
@@ -89,9 +98,13 @@ def evaluate_scores(df: pd.DataFrame, truth: pd.DataFrame) -> dict:
     for name in ("iforest_flag", "rule_flag"):
         flagged = set(df.loc[df[name], "key"])
         tp = len(flagged & positives)
-        out[name] = {"flagged": len(flagged), "tp": tp,
-                     "precision": round(tp / len(flagged), 4) if flagged else None,
-                     "recall": round(tp / len(positives), 4) if positives else None}
+        precision = tp / len(flagged) if flagged else None
+        recall = tp / len(positives) if positives else None
+        f1 = 2 * precision * recall / (precision + recall) if precision and recall else 0.0 if flagged and positives else None
+        out[name] = {"flagged": len(flagged), "tp": tp, "fp": len(flagged) - tp, "fn": len(positives) - tp,
+                     "precision": None if precision is None else round(precision, 4),
+                     "recall": None if recall is None else round(recall, 4),
+                     "f1": None if f1 is None else round(f1, 4)}
     flagged = set(df.loc[df["iforest_flag"], "key"])
     pat = {}
     for p, grp in truth.groupby("pattern"):
