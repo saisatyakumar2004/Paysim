@@ -53,7 +53,7 @@ def evaluate_all(db_path=None, truth_path=None) -> dict:
     report["dq_repairs"] = {"reported_by_rules": dict(repaired), "injected": inj}
 
     # 2. reconciliation status ------------------------------------------------------------------------
-    recon = con.execute("SELECT txn_id, status, match_method, is_duplicate_charge, order_issue "
+    recon = con.execute("SELECT txn_id, status, match_method, is_duplicate_charge, is_suspected_duplicate, order_issue "
                         "FROM gold.fact_reconciliation WHERE item_type = 'txn'").df()
     truth = t_txn[t_txn["expected_status"] != "QUARANTINED"].merge(recon, on="txn_id", how="left")
     report["recon_txn_population"] = {"truth_txns": int(len(truth)), "found_in_gold": int(truth["status"].notna().sum())}
@@ -80,6 +80,13 @@ def evaluate_all(db_path=None, truth_path=None) -> dict:
     found_dup = truth["is_duplicate_charge_y"].fillna(False).astype(bool)
     report["duplicate_charges"] = _pr(int((truth_dup & found_dup).sum()), int((~truth_dup & found_dup).sum()),
                                       int((truth_dup & ~found_dup).sum()))
+    # second tier: SUSPECTED (the original was quarantined, so the pair cannot be confirmed from trusted records)
+    suspected = truth["is_suspected_duplicate"].fillna(False).astype(bool)
+    report["duplicate_charges_suspected"] = _pr(int((truth_dup & suspected).sum()), int((~truth_dup & suspected).sum()),
+                                                int((truth_dup & ~found_dup & ~suspected).sum()))
+    either = found_dup | suspected
+    report["duplicate_charges_combined"] = _pr(int((truth_dup & either).sum()), int((~truth_dup & either).sum()),
+                                               int((truth_dup & ~either).sum()))
 
     # 3. settlement-side items ----------------------------------------------------------------------------
     stl_items = con.execute("SELECT settlement_id, status FROM gold.fact_reconciliation "
@@ -107,8 +114,16 @@ def evaluate_all(db_path=None, truth_path=None) -> dict:
     no_order = set(t_ord[t_ord["issue"] == "NO_ORDER"]["order_id"])
     flagged = con.execute("SELECT r.order_id FROM gold.fact_reconciliation r WHERE r.order_issue = 'NO_ORDER'"
                           ).df()["order_id"]
-    report["no_order_payments"] = {"injected": len(no_order), "flagged": len(set(flagged)),
-                                   "recall": round(len(no_order & set(flagged)) / len(no_order), 4) if no_order else None}
+    trusted_orders = set(con.execute("SELECT DISTINCT order_id FROM silver.gateway_txns WHERE order_id IS NOT NULL "
+                                     "AND status = 'captured' AND txn_type = 'payment'").df()["order_id"])
+    in_scope = no_order & trusted_orders                 # the payment reached trusted data, so it CAN be flagged
+    report["no_order_payments"] = {
+        "injected": len(no_order), "flagged": len(set(flagged)),
+        "recall": round(len(no_order & set(flagged)) / len(no_order), 4) if no_order else None,
+        "trusted_payments": len(in_scope), "flagged_of_trusted": len(in_scope & set(flagged)),
+        "recall_on_trusted_payments": round(len(in_scope & set(flagged)) / len(in_scope), 4) if in_scope else None,
+        "false_positives": len(set(flagged) - no_order),
+        "not_detectable_payment_quarantined": len(no_order - trusted_orders)}
 
     # headline money
     report["money_at_risk_by_status"] = con.execute(
@@ -133,7 +148,9 @@ def print_report(r: dict) -> None:
         line(s, d)
     line("fuzzy matches", r["fuzzy_match"])
     if "duplicate_charges" in r:
-        line("duplicate charges", r["duplicate_charges"])
+        line("duplicate charges (confirmed)", r["duplicate_charges"])
+        line("duplicate charges (suspected)", r["duplicate_charges_suspected"])
+        line("duplicate charges (combined)", r["duplicate_charges_combined"])
     line("orphan settlements", r["orphan_settlements"])
     line("settlements of quarantined txns", r["source_quarantined_settlements"])
     print(f"  order without payment: {r['order_without_payment']}")

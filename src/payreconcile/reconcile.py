@@ -32,10 +32,12 @@ from . import config
 
 ITEM_COLUMNS = ("item_id, item_type, txn_id, settlement_id, order_id, merchant_id, event_date, expected_amount, "
                 "settled_amount, diff_amount, status, match_method, is_duplicate_charge, duplicate_exposure, "
-                "order_issue, money_at_risk")
+                "order_issue, is_suspected_duplicate, duplicate_of, duplicate_basis, suspected_duplicate_exposure, "
+                "money_at_risk")
 COMPARED = ["item_type", "txn_id", "settlement_id", "order_id", "merchant_id", "event_date", "expected_amount",
             "settled_amount", "diff_amount", "status", "match_method", "is_duplicate_charge", "duplicate_exposure",
-            "order_issue", "money_at_risk"]
+            "order_issue", "is_suspected_duplicate", "duplicate_of", "duplicate_basis",
+            "suspected_duplicate_exposure", "money_at_risk"]
 
 
 @dataclass
@@ -105,6 +107,7 @@ def reconcile(con, as_of: date, run_id: str = "manual", run_date: date | None = 
     if not full:
         _fuzzy_closure(con, sla, tol, edit)
     _fuzzy_links(con, sla, tol, edit)
+    _build_evidence(con, sla, tol, edit)
 
     # ---- 3. new state of every scoped item ---------------------------------------------------------------------
     _build_items(con, AS_OF, sla, tol, dup_min)
@@ -125,7 +128,7 @@ def reconcile(con, as_of: date, run_id: str = "manual", run_date: date | None = 
     try:
         con.execute("DELETE FROM gold.fact_reconciliation WHERE item_id IN (SELECT item_id FROM delta)")
         con.execute(f"""
-            INSERT INTO gold.fact_reconciliation
+            INSERT INTO gold.fact_reconciliation ({ITEM_COLUMNS}, status_since, updated_run_id)
             SELECT {', '.join('n.' + c.strip() for c in ITEM_COLUMNS.split(','))}, d.keep_since, ?
             FROM new_items n JOIN delta d ON d.item_id = n.item_id WHERE d.change_kind <> 'CLOSED'""", [run_id])
         con.execute("""
@@ -137,10 +140,14 @@ def reconcile(con, as_of: date, run_id: str = "manual", run_date: date | None = 
             FROM delta""", [run_id, run_date, as_of])
         if full:
             con.execute("DELETE FROM gold.recon_links")
+            con.execute("DELETE FROM gold.recon_match_evidence")
         else:
             con.execute("DELETE FROM gold.recon_links WHERE txn_id IN (SELECT txn_id FROM scope_txn) "
                         "OR settlement_id IN (SELECT settlement_id FROM scope_stl)")
+            con.execute("DELETE FROM gold.recon_match_evidence WHERE txn_id IN (SELECT txn_id FROM scope_txn) "
+                        "OR settlement_id IN (SELECT settlement_id FROM scope_stl)")
         con.execute("INSERT INTO gold.recon_links SELECT * FROM links_new")
+        con.execute("INSERT INTO gold.recon_match_evidence SELECT *, ?, now() FROM match_evidence", [run_id])
         con.execute("DELETE FROM ops.recon_state")
         con.execute("INSERT INTO ops.recon_state VALUES (1, ?, ?, now())", [max_seq, as_of])
         stats.items_total = _count(con, "gold.fact_reconciliation")
@@ -274,21 +281,53 @@ def _fuzzy_closure(con, sla: int, tol: float, edit: int) -> None:
 def _fuzzy_links(con, sla: int, tol: float, edit: int) -> None:
     pred = _pair_predicate(sla, tol, edit)
     con.execute(f"""
-        INSERT INTO links_new
-        SELECT txn_id, settlement_id, 'fuzzy', edit_distance::INTEGER FROM (
-            SELECT t.txn_id, s.settlement_id, levenshtein(s.gateway_ref_norm, t.txn_id) AS edit_distance,
-                   count(*) OVER (PARTITION BY t.txn_id) AS n_t, count(*) OVER (PARTITION BY s.settlement_id) AS n_s
-            FROM (SELECT * FROM t_scope WHERE txn_id NOT IN (SELECT txn_id FROM links_new)) t
-            JOIN (SELECT * FROM s_scope WHERE settlement_id NOT IN (SELECT settlement_id FROM links_new)
-                    AND gateway_ref_norm NOT IN {_quarantined_gateway_keys()}) s ON {pred})
-        WHERE n_t = 1 AND n_s = 1""")
+        CREATE OR REPLACE TEMP TABLE fuzzy_cand AS
+        SELECT t.txn_id, s.settlement_id, levenshtein(s.gateway_ref_norm, t.txn_id)::INTEGER AS edit_distance,
+               abs(s.gross_amount - t.expected_gross) AS amount_diff, (s.settlement_date - t.txn_date)::INTEGER AS days_gap,
+               s.merchant_id = t.merchant_id AS merchant_match,
+               (count(*) OVER (PARTITION BY t.txn_id))::INTEGER AS n_t,
+               (count(*) OVER (PARTITION BY s.settlement_id))::INTEGER AS n_s
+        FROM (SELECT * FROM t_scope WHERE txn_id NOT IN (SELECT txn_id FROM links_new)) t
+        JOIN (SELECT * FROM s_scope WHERE settlement_id NOT IN (SELECT settlement_id FROM links_new)
+                AND gateway_ref_norm NOT IN {_quarantined_gateway_keys()}) s ON {pred}""")
+    con.execute("""INSERT INTO links_new
+                   SELECT txn_id, settlement_id, 'fuzzy', edit_distance FROM fuzzy_cand WHERE n_t = 1 AND n_s = 1""")
+
+
+def _build_evidence(con, sla: int, tol: float, edit: int) -> None:
+    """One row per exact link and per fuzzy CANDIDATE pair: features, score, threshold, decision and reason.
+
+    Fuzzy matching is a constraint matcher (merchant, amount, window, edit distance) plus a uniqueness rule; `score`
+    is only the reference similarity 1 - edit_distance / (max_edit_distance + 1). The decision is the uniqueness rule.
+    """
+    threshold = f"max_edit_distance={edit};amount_tolerance={tol};window_days={sla};must_be_unique_from_both_sides"
+    con.execute(f"""
+        CREATE OR REPLACE TEMP TABLE match_evidence AS
+        SELECT l.txn_id, l.settlement_id, 'exact' AS method, 'LINKED' AS decision, 0::INTEGER AS edit_distance,
+               abs(s.gross_amount - t.expected_gross) AS amount_diff, (s.settlement_date - t.txn_date)::INTEGER AS days_gap,
+               s.merchant_id = t.merchant_id AS merchant_match, 1::INTEGER AS txn_candidates,
+               1::INTEGER AS settlement_candidates, 1.0 AS score, '{threshold}' AS threshold,
+               'gateway txn_id equals the normalised bank reference' AS reason
+        FROM links_new l JOIN t_scope t ON t.txn_id = l.txn_id JOIN s_scope s ON s.settlement_id = l.settlement_id
+        WHERE l.match_method = 'exact'
+        UNION ALL
+        SELECT c.txn_id, c.settlement_id, 'fuzzy',
+               CASE WHEN c.n_t = 1 AND c.n_s = 1 THEN 'LINKED' ELSE 'AMBIGUOUS_NOT_LINKED' END,
+               c.edit_distance, c.amount_diff, c.days_gap, c.merchant_match, c.n_t, c.n_s,
+               round(1 - c.edit_distance / ({edit} + 1.0), 4), '{threshold}',
+               CASE WHEN c.n_t = 1 AND c.n_s = 1
+                    THEN 'unique candidate from both sides: references differ by ' || c.edit_distance
+                         || ' character(s); same merchant; amount within tolerance; settled inside the SLA window'
+                    ELSE 'ambiguous: the txn has ' || c.n_t || ' candidate settlement(s) and the settlement has '
+                         || c.n_s || ' candidate txn(s); no match was made' END
+        FROM fuzzy_cand c""")
 
 
 def _build_items(con, AS_OF: str, sla: int, tol: float, dup_min: int) -> None:
     quarantined = _quarantined_gateway_keys()
     con.execute(f"""
         CREATE OR REPLACE TEMP TABLE dup AS
-        SELECT t.txn_id, t.amount AS duplicate_exposure
+        SELECT t.txn_id, t.amount AS duplicate_exposure, min(p.txn_id) AS original_txn_id
         FROM t_scope t
         JOIN (SELECT txn_id, order_id, merchant_id, amount, created_at FROM silver.gateway_txns
               WHERE status = 'captured' AND txn_type = 'payment'
@@ -298,6 +337,24 @@ def _build_items(con, AS_OF: str, sla: int, tol: float, dup_min: int) -> None:
          AND t.created_at <= p.created_at + INTERVAL '{dup_min} minutes'
         WHERE t.txn_type = 'payment'
         GROUP BY t.txn_id, t.amount""")
+    # A second charge whose ORIGINAL failed validation cannot be paired with a trusted record. If the order also has a
+    # quarantined payment attempt that is not contradicted by its own (parseable) fields, the charge is SUSPECTED, not
+    # confirmed: separate flag and evidence tier, never merged into the confirmed duplicate count.
+    win = dup_min * 60
+    qamt = "pr_amt(json_extract_string(q.raw_json, '$.amount'))"
+    qts = "pr_ts(json_extract_string(q.raw_json, '$.created_at'))"
+    con.execute(f"""
+        CREATE OR REPLACE TEMP TABLE qdup AS
+        SELECT t.txn_id, min(q.natural_key) AS duplicate_of
+        FROM t_scope t
+        JOIN quarantine.rows q ON q.dataset = 'gateway' AND q.order_id = t.order_id AND q.natural_key <> t.txn_id
+        WHERE t.txn_type = 'payment' AND t.order_id IS NOT NULL
+          AND q.natural_key NOT IN (SELECT txn_id FROM silver.gateway_txns)
+          AND coalesce(lower(json_extract_string(q.raw_json, '$.txn_type')), 'payment') = 'payment'
+          AND coalesce(lower(json_extract_string(q.raw_json, '$.status')), '') NOT IN ('failed', 'pending')
+          AND ({qamt} IS NULL OR {qamt} <= 0 OR {qamt} = t.amount)
+          AND ({qts} IS NULL OR abs(epoch({qts} - t.created_at)) > 86400 OR abs(epoch({qts} - t.created_at)) <= {win})
+        GROUP BY t.txn_id""")
     con.execute(f"""
         CREATE OR REPLACE TEMP TABLE new_items AS
         WITH txn_items AS (
@@ -319,11 +376,17 @@ def _build_items(con, AS_OF: str, sla: int, tol: float, dup_min: int) -> None:
                              AND t.order_id NOT IN (SELECT natural_key FROM quarantine.rows
                                                     WHERE dataset = 'orders' AND natural_key IS NOT NULL) THEN 'NO_ORDER'
                         WHEN t.txn_type = 'payment' AND o.order_id IS NOT NULL
-                             AND abs(o.order_amount - t.amount) > {tol} THEN 'AMOUNT_DIFF' END AS order_issue
+                             AND abs(o.order_amount - t.amount) > {tol} THEN 'AMOUNT_DIFF' END AS order_issue,
+                   d.txn_id IS NULL AND qd.txn_id IS NOT NULL AS is_suspected_duplicate,
+                   coalesce(d.original_txn_id, qd.duplicate_of) AS duplicate_of,
+                   CASE WHEN d.txn_id IS NOT NULL THEN 'TRUSTED_PAIR'
+                        WHEN qd.txn_id IS NOT NULL THEN 'QUARANTINED_ORIGINAL' END AS duplicate_basis,
+                   CASE WHEN d.txn_id IS NULL AND qd.txn_id IS NOT NULL THEN t.amount ELSE 0 END AS suspected_duplicate_exposure
             FROM t_scope t
             LEFT JOIN links_new l ON l.txn_id = t.txn_id
             LEFT JOIN silver.settlements s ON s.settlement_id = l.settlement_id
             LEFT JOIN dup d ON d.txn_id = t.txn_id
+            LEFT JOIN qdup qd ON qd.txn_id = t.txn_id
             LEFT JOIN silver.orders o ON o.order_id = t.order_id),
         settlement_items AS (
             SELECT 'STL:' || s.settlement_id, 'settlement', NULL::VARCHAR, s.settlement_id, NULL::VARCHAR, s.merchant_id,
@@ -331,7 +394,7 @@ def _build_items(con, AS_OF: str, sla: int, tol: float, dup_min: int) -> None:
                    CASE WHEN s.gateway_ref_norm IN {quarantined} THEN 'SOURCE_QUARANTINED'
                         WHEN s.gateway_ref_norm IN (SELECT txn_id FROM silver.gateway_txns) THEN 'SETTLED_NOT_CAPTURED'
                         ELSE 'ORPHAN_SETTLEMENT' END,
-                   NULL::VARCHAR, false, 0::DOUBLE, NULL::VARCHAR
+                   NULL::VARCHAR, false, 0::DOUBLE, NULL::VARCHAR, false, NULL::VARCHAR, NULL::VARCHAR, 0::DOUBLE
             FROM s_scope s WHERE s.settlement_id NOT IN (SELECT settlement_id FROM links_new)),
         order_items AS (
             SELECT 'ORD:' || o.order_id, 'order', NULL::VARCHAR, NULL::VARCHAR, o.order_id, o.merchant_id,
@@ -339,7 +402,7 @@ def _build_items(con, AS_OF: str, sla: int, tol: float, dup_min: int) -> None:
                    CASE WHEN o.order_id IN (SELECT order_id FROM quarantine.rows
                                             WHERE dataset = 'gateway' AND order_id IS NOT NULL)
                         THEN 'PAYMENT_QUARANTINED' ELSE 'ORDER_WITHOUT_PAYMENT' END,
-                   NULL::VARCHAR, false, 0::DOUBLE, NULL::VARCHAR
+                   NULL::VARCHAR, false, 0::DOUBLE, NULL::VARCHAR, false, NULL::VARCHAR, NULL::VARCHAR, 0::DOUBLE
             FROM silver.orders o
             WHERE o.order_id IN (SELECT order_id FROM scope_ord) AND o.order_status IN ('paid', 'refunded')
               AND cast(o.created_at AS DATE) + 2 < {AS_OF}

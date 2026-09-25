@@ -76,9 +76,19 @@ CREATE TABLE IF NOT EXISTS gold.fact_reconciliation (
     item_id VARCHAR, item_type VARCHAR, txn_id VARCHAR, settlement_id VARCHAR, order_id VARCHAR, merchant_id VARCHAR,
     event_date DATE, expected_amount DOUBLE, settled_amount DOUBLE, diff_amount DOUBLE, status VARCHAR,
     match_method VARCHAR, is_duplicate_charge BOOLEAN, duplicate_exposure DOUBLE, order_issue VARCHAR,
-    money_at_risk DOUBLE, status_since DATE, updated_run_id VARCHAR);
+    money_at_risk DOUBLE, status_since DATE, updated_run_id VARCHAR,
+    is_suspected_duplicate BOOLEAN, duplicate_of VARCHAR, duplicate_basis VARCHAR, suspected_duplicate_exposure DOUBLE);
+ALTER TABLE gold.fact_reconciliation ADD COLUMN IF NOT EXISTS is_suspected_duplicate BOOLEAN;
+ALTER TABLE gold.fact_reconciliation ADD COLUMN IF NOT EXISTS duplicate_of VARCHAR;
+ALTER TABLE gold.fact_reconciliation ADD COLUMN IF NOT EXISTS duplicate_basis VARCHAR;
+ALTER TABLE gold.fact_reconciliation ADD COLUMN IF NOT EXISTS suspected_duplicate_exposure DOUBLE;
 CREATE TABLE IF NOT EXISTS gold.recon_links (
     txn_id VARCHAR, settlement_id VARCHAR, match_method VARCHAR, edit_distance INTEGER);
+-- Why two records were (or were not) considered the same transaction: features, score, threshold, decision, reason.
+CREATE TABLE IF NOT EXISTS gold.recon_match_evidence (
+    txn_id VARCHAR, settlement_id VARCHAR, method VARCHAR, decision VARCHAR, edit_distance INTEGER,
+    amount_diff DOUBLE, days_gap INTEGER, merchant_match BOOLEAN, txn_candidates INTEGER, settlement_candidates INTEGER,
+    score DOUBLE, threshold VARCHAR, reason VARCHAR, run_id VARCHAR, decided_at TIMESTAMP);
 -- Append-only history of every reconciliation status change. Never updated or deleted.
 CREATE TABLE IF NOT EXISTS gold.reconciliation_audit (
     audit_id BIGINT DEFAULT nextval('gold.audit_seq'), run_id VARCHAR, run_date DATE, as_of_date DATE,

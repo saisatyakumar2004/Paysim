@@ -20,7 +20,7 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from payreconcile import config, db  # noqa: E402
+from payreconcile import config  # noqa: E402
 
 
 def main() -> int:

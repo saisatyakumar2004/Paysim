@@ -29,6 +29,14 @@ def main(argv: list[str] | None = None) -> int:
     r = sub.add_parser("run", help="run the pipeline for one day")
     r.add_argument("--date", type=_d, required=True)
     r.add_argument("--no-dbt", action="store_true")
+    r.add_argument("--source", choices=["files", "api"], default="files", help="gateway source (api = local HTTP API)")
+    r.add_argument("--api-url", default=None)
+
+    sv = sub.add_parser("serve-api", help="serve the seeded gateway data over HTTP (needs the [api] extra)")
+    sv.add_argument("--host", default="127.0.0.1")
+    sv.add_argument("--port", type=int, default=8765)
+    sv.add_argument("--fail-first", type=int, default=0, help="answer the first N requests with HTTP 503")
+    sv.add_argument("--delay", type=float, default=0.0, help="delay every response (seconds)")
 
     b = sub.add_parser("backfill", help="run the pipeline for a date range (sequentially)")
     b.add_argument("--start", type=_d, required=True)
@@ -46,6 +54,9 @@ def main(argv: list[str] | None = None) -> int:
     vr = sub.add_parser("verify-recon", help="check incremental state against a from-scratch rebuild")
     vr.add_argument("--reference", action="store_true", help="also compare with the independent dbt reference model")
 
+    ex = sub.add_parser("explain", help="explain a reconciliation item: evidence, audit history, source records")
+    ex.add_argument("item_id", help="e.g. TXN:TXN1234567890, STL:STL000000012, ORD:ORD00000012")
+
     sub.add_parser("evaluate", help="score pipeline output against the generator's ground truth")
     sub.add_parser("anomalies", help="train + score the merchant-day anomaly model on trusted data")
     sub.add_parser("reset", help="delete the warehouse and bronze layers (keeps source data)")
@@ -62,7 +73,14 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(s, indent=2, default=str))
     elif args.cmd == "run":
         from .pipeline import run_day
-        print(_fmt(run_day(args.date, run_dbt=not args.no_dbt)))
+        client = None
+        if args.source == "api":
+            from .ingest import HttpGatewayClient
+            client = HttpGatewayClient(args.api_url)
+        print(_fmt(run_day(args.date, run_dbt=not args.no_dbt, gateway_client=client)))
+    elif args.cmd == "serve-api":
+        from .gateway_api import serve
+        serve(args.host, args.port, args.fail_first, args.delay)
     elif args.cmd == "backfill":
         if args.prefect:
             from .flows import backfill_flow
@@ -96,6 +114,12 @@ def main(argv: list[str] | None = None) -> int:
             out["vs_dbt_reference"] = reconcile.compare_with_reference(con)
         con.close()
         print(json.dumps(out, indent=2, default=str))
+    elif args.cmd == "explain":
+        from . import db
+        from .explain import explain
+        con = db.connect(read_only=True)
+        print(json.dumps(explain(con, args.item_id), indent=2, default=str))
+        con.close()
     elif args.cmd == "evaluate":
         from .evaluate import evaluate_all, print_report
         print_report(evaluate_all())

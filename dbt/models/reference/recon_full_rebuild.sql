@@ -7,9 +7,26 @@
 --   item_type = order       a paid order with no captured payment
 {% set as_of = "cast('" ~ var('as_of_date') ~ "' as date)" %}
 
+{% set win = var('dup_window_minutes') * 60 %}
+{% set qamt = "pr_amt(json_extract_string(q.raw_json, '$.amount'))" %}
+{% set qts = "pr_ts(json_extract_string(q.raw_json, '$.created_at'))" %}
+
 with gateway_keys as (
     select natural_key from {{ source('quarantine', 'rows') }}
     where dataset = 'gateway' and natural_key is not null
+),
+qdup as (
+    select t.txn_id, min(q.natural_key) as duplicate_of
+    from {{ ref('int_txns_captured') }} t
+    join {{ source('quarantine', 'rows') }} q
+      on q.dataset = 'gateway' and q.order_id = t.order_id and q.natural_key <> t.txn_id
+    where t.txn_type = 'payment' and t.order_id is not null
+      and q.natural_key not in (select txn_id from {{ source('silver', 'gateway_txns') }})
+      and coalesce(lower(json_extract_string(q.raw_json, '$.txn_type')), 'payment') = 'payment'
+      and coalesce(lower(json_extract_string(q.raw_json, '$.status')), '') not in ('failed', 'pending')
+      and ({{ qamt }} is null or {{ qamt }} <= 0 or {{ qamt }} = t.amount)
+      and ({{ qts }} is null or abs(epoch({{ qts }} - t.created_at)) > 86400 or abs(epoch({{ qts }} - t.created_at)) <= {{ win }})
+    group by t.txn_id
 ),
 txn_items as (
     select
@@ -43,11 +60,17 @@ txn_items as (
             when t.txn_type = 'payment' and o.order_id is not null
                  and abs(o.order_amount - t.amount) > {{ var('amount_tolerance') }}
                 then 'AMOUNT_DIFF'
-        end as order_issue
+        end as order_issue,
+        d.txn_id is null and qd.txn_id is not null as is_suspected_duplicate,
+        coalesce(d.original_txn_id, qd.duplicate_of) as duplicate_of,
+        case when d.txn_id is not null then 'TRUSTED_PAIR'
+             when qd.txn_id is not null then 'QUARANTINED_ORIGINAL' end as duplicate_basis,
+        case when d.txn_id is null and qd.txn_id is not null then t.amount else 0 end as suspected_duplicate_exposure
     from {{ ref('int_txns_captured') }} t
     left join {{ ref('int_txn_settlement_links') }} l on l.txn_id = t.txn_id
     left join {{ source('silver', 'settlements') }} s on s.settlement_id = l.settlement_id
     left join {{ ref('int_duplicate_charges') }} d on d.txn_id = t.txn_id
+    left join qdup qd on qd.txn_id = t.txn_id
     left join {{ source('silver', 'orders') }} o on o.order_id = t.order_id
 ),
 settlement_items as (
@@ -70,7 +93,11 @@ settlement_items as (
         cast(null as varchar) as match_method,
         false as is_duplicate_charge,
         cast(0 as double) as duplicate_exposure,
-        cast(null as varchar) as order_issue
+        cast(null as varchar) as order_issue,
+        false as is_suspected_duplicate,
+        cast(null as varchar) as duplicate_of,
+        cast(null as varchar) as duplicate_basis,
+        cast(0 as double) as suspected_duplicate_exposure
     from {{ source('silver', 'settlements') }} s
     where s.settlement_id not in (select settlement_id from {{ ref('int_txn_settlement_links') }})
 ),
@@ -92,7 +119,11 @@ order_items as (
         cast(null as varchar) as match_method,
         false as is_duplicate_charge,
         cast(0 as double) as duplicate_exposure,
-        cast(null as varchar) as order_issue
+        cast(null as varchar) as order_issue,
+        false as is_suspected_duplicate,
+        cast(null as varchar) as duplicate_of,
+        cast(null as varchar) as duplicate_basis,
+        cast(0 as double) as suspected_duplicate_exposure
     from {{ source('silver', 'orders') }} o
     where o.order_status in ('paid', 'refunded')
       and cast(o.created_at as date) + 2 < {{ as_of }}

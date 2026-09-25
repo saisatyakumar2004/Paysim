@@ -10,11 +10,13 @@ select
     count(*) filter (where status = 'ORPHAN_SETTLEMENT') as orphan_settlement,
     count(*) filter (where status = 'ORDER_WITHOUT_PAYMENT') as order_without_payment,
     count(*) filter (where is_duplicate_charge) as duplicate_charges,
+    count(*) filter (where is_suspected_duplicate) as suspected_duplicate_charges,
     count(*) filter (where match_method = 'fuzzy') as fuzzy_matched,
     round(count(*) filter (where status = 'MATCHED') * 1.0 /
           nullif(count(*) filter (where item_type = 'txn' and status not in ('PENDING', 'ORPHAN_REFUND')), 0), 4) as match_rate,
     round(sum(money_at_risk), 2) as money_at_risk,
-    round(sum(duplicate_exposure), 2) as duplicate_exposure
+    round(sum(duplicate_exposure), 2) as duplicate_exposure,
+    round(sum(suspected_duplicate_exposure), 2) as suspected_duplicate_exposure
 from {{ source('recon', 'fact_reconciliation') }}
 group by event_date
 order by event_date

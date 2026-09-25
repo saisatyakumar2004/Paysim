@@ -7,6 +7,8 @@ with by_merchant as (
         count(*) filter (where status = 'AMOUNT_MISMATCH') as amount_mismatch,
         count(*) filter (where status = 'MISSING_SETTLEMENT') as missing_settlement,
         count(*) filter (where is_duplicate_charge) as duplicate_charges,
+        count(*) filter (where is_suspected_duplicate) as suspected_duplicate_charges,
+        sum(suspected_duplicate_exposure) as suspected_duplicate_exposure,
         sum(money_at_risk) + sum(duplicate_exposure) as total_exposure
     from {{ source('recon', 'fact_reconciliation') }}
     where merchant_id is not null
