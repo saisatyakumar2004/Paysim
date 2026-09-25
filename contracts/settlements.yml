@@ -1,0 +1,16 @@
+dataset: settlements
+description: Bank settlement files (daily CSV, T+1 / T+2 lag)
+weight: 3
+natural_key: settlement_id
+columns:
+  required: [settlement_id, gateway_ref, merchant_id, gross_amount, fee_amount, net_amount, settlement_date]
+  aliases: {txn_reference: gateway_ref}      # the bank has renamed this column before
+rules:
+  - {id: ST-CMP-01, type: not_null, column: settlement_id, severity: CRITICAL, desc: "settlement_id present"}
+  - {id: ST-CMP-02, type: not_null, column: gateway_ref, severity: ERROR, desc: "gateway_ref present"}
+  - {id: ST-UNQ-01, type: unique, column: settlement_id, severity: ERROR, desc: "settlement_id unique within the file (bank re-send)"}
+  - {id: ST-VAL-01, type: expr, severity: ERROR, desc: "settlement_date is a valid date <= run_date", violation: "try_cast(trim(settlement_date) AS DATE) IS NULL OR try_cast(trim(settlement_date) AS DATE) > DATE '$run_date'"}
+  - {id: ST-VAL-02, type: expr, severity: ERROR, desc: "gross_amount numeric", violation: "pr_amt(gross_amount) IS NULL"}
+  - {id: ST-VAL-03, type: expr, severity: ERROR, desc: "fee_amount numeric", violation: "pr_amt(fee_amount) IS NULL"}
+  - {id: ST-BUS-01, type: expr, severity: WARN, action: flag, desc: "net = gross - fee within 0.01", violation: "abs(pr_amt(net_amount) - (pr_amt(gross_amount) - pr_amt(fee_amount))) > 0.01"}
+  - {id: ST-REF-01, type: fk, column: merchant_id, ref_sql: "SELECT merchant_id FROM silver.merchants_scd2 WHERE is_current", severity: WARN, action: flag, desc: "merchant exists in the merchant master"}

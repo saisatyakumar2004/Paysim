@@ -1,0 +1,20 @@
+name: payreconcile
+version: "1.0.0"
+config-version: 2
+profile: payreconcile
+
+model-paths: ["models"]
+test-paths: ["tests"]
+macro-paths: ["macros"]
+
+vars:
+  as_of_date: "2026-12-31"
+  amount_tolerance: 1.0
+  sla_days: 3
+  max_edit_distance: 2
+  dup_window_minutes: 10
+
+models:
+  payreconcile:
+    +materialized: table
+    +schema: gold

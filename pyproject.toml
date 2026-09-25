@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "payreconcile"
+version = "0.1.0"
+description = "Payments reconciliation and fraud-signal data platform (DuckDB + dbt + Python)"
+requires-python = ">=3.11"
+dependencies = [
+  "duckdb>=1.1",
+  "pandas>=2.2",
+  "pyarrow>=15",
+  "numpy>=1.26",
+  "pyyaml>=6",
+  "scikit-learn>=1.4",
+  "dbt-core>=1.8",
+  "dbt-duckdb>=1.8",
+]
+
+[project.optional-dependencies]
+dashboard = ["streamlit>=1.35"]
+orchestration = ["prefect>=3"]
+dev = ["pytest>=8", "ruff>=0.5"]
+
+[project.scripts]
+payreconcile = "payreconcile.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+markers = ["slow: end-to-end tests that run the whole pipeline and dbt"]

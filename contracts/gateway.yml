@@ -1,0 +1,27 @@
+dataset: gateway
+description: Payment-gateway transactions (paginated JSON API)
+weight: 3                      # dataset weight in the overall DQ score
+natural_key: txn_id
+columns:
+  required: [txn_id, order_id, merchant_id, amount, currency, status, method, txn_type, refund_of, created_at]
+  aliases: {}
+rules:
+  - {id: GW-CMP-01, type: not_null, column: txn_id, severity: CRITICAL, desc: "txn_id present"}
+  - {id: GW-CMP-02, type: not_null, column: order_id, severity: ERROR, desc: "order_id present (payment traceable to an order)"}
+  - {id: GW-CMP-03, type: not_null, column: merchant_id, severity: ERROR, desc: "merchant_id present"}
+  - {id: GW-UNQ-01, type: unique, column: txn_id, severity: ERROR, desc: "txn_id unique within the batch (duplicate webhook)"}
+  - id: GW-VAL-01
+    type: expr
+    severity: ERROR
+    desc: "created_at parses and lies in [2020-01-01, run_date+1)"
+    violation: "pr_ts(created_at) IS NULL OR pr_ts(created_at) < TIMESTAMP '2020-01-01' OR pr_ts(created_at) >= TIMESTAMP '$run_date_next'"
+  - {id: GW-VAL-02, type: expr, severity: ERROR, desc: "amount is numeric", violation: "pr_amt(amount) IS NULL"}
+  - {id: GW-VAL-03, type: expr, severity: ERROR, desc: "amount > 0", violation: "pr_amt(amount) <= 0"}
+  - {id: GW-VAL-04, type: accepted, column: status, values: [captured, failed, pending], severity: ERROR, desc: "status in allowed set"}
+  - {id: GW-VAL-05, type: accepted, column: method, values: [upi, card, netbanking, wallet], severity: ERROR, desc: "payment method in allowed set"}
+  - {id: GW-VAL-06, type: accepted, column: txn_type, values: [payment, refund], severity: ERROR, desc: "txn_type in allowed set"}
+  - {id: GW-VAL-07, type: accepted, column: currency, values: [INR], severity: ERROR, desc: "currency is INR"}
+  - {id: GW-VAL-08, type: expr, severity: ERROR, desc: "refund rows carry refund_of", violation: "txn_type = 'refund' AND (refund_of IS NULL OR trim(refund_of) = '')"}
+  - {id: GW-FIX-01, type: expr, severity: WARN, action: repair, desc: "amount carried a currency symbol or thousands separator (repaired)", violation: "regexp_matches(amount, '[^0-9.\\-]')"}
+  - {id: GW-FIX-02, type: expr, severity: WARN, action: repair, desc: "created_at was not ISO-8601 (repaired)", violation: "trim(created_at) NOT LIKE '____-__-__T__:__:__' AND pr_ts(created_at) IS NOT NULL"}
+  - {id: GW-REF-01, type: fk, column: merchant_id, ref_sql: "SELECT merchant_id FROM silver.merchants_scd2 WHERE is_current", severity: ERROR, desc: "merchant exists in the merchant master"}

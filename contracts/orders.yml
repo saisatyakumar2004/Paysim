@@ -1,0 +1,13 @@
+dataset: orders
+description: Order-system change log (SQLite extract, watermark on updated_at)
+weight: 2
+natural_key: order_id
+columns:
+  required: [order_id, merchant_id, customer_id, order_amount, order_status, created_at, updated_at]
+  aliases: {}
+rules:
+  - {id: OR-CMP-01, type: not_null, column: order_id, severity: CRITICAL, desc: "order_id present"}
+  - {id: OR-VAL-01, type: expr, severity: ERROR, desc: "order_amount numeric and > 0", violation: "pr_amt(order_amount) IS NULL OR pr_amt(order_amount) <= 0"}
+  - {id: OR-VAL-02, type: accepted, column: order_status, values: [paid, cancelled, refunded, pending], severity: ERROR, desc: "order_status in allowed set"}
+  - {id: OR-VAL-03, type: expr, severity: ERROR, desc: "created_at and updated_at parse", violation: "pr_ts(created_at) IS NULL OR pr_ts(updated_at) IS NULL"}
+  - {id: OR-REF-01, type: fk, column: merchant_id, ref_sql: "SELECT merchant_id FROM silver.merchants_scd2 WHERE is_current", severity: ERROR, desc: "merchant exists in the merchant master"}

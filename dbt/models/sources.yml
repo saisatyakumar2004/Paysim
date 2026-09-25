@@ -1,0 +1,26 @@
+version: 2
+
+sources:
+  - name: silver
+    schema: silver
+    description: Typed, de-duplicated rows that passed data quality (built by the Python pipeline).
+    tables:
+      - name: merchants_scd2
+      - name: orders
+        columns:
+          - name: order_id
+            data_tests: [unique, not_null]
+      - name: gateway_txns
+        columns:
+          - name: txn_id
+            data_tests: [unique, not_null]
+          - name: amount
+            data_tests: [not_null]
+      - name: settlements
+        columns:
+          - name: settlement_id
+            data_tests: [unique, not_null]
+  - name: quarantine
+    schema: quarantine
+    tables:
+      - name: rows

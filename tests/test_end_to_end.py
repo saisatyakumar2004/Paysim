@@ -1,0 +1,114 @@
+"""End-to-end: generate -> pipeline (with dbt) -> score against ground truth -> failure scenarios."""
+
+from __future__ import annotations
+
+from datetime import date, timedelta
+
+import duckdb
+import pytest
+
+from payreconcile import config, ingest, pipeline
+from payreconcile.evaluate import evaluate_all
+from payreconcile.generate import GenConfig, generate
+
+pytestmark = pytest.mark.slow
+DAYS = 10
+START = date(2026, 1, 1)
+LAST = START + timedelta(days=DAYS - 1)
+
+
+@pytest.fixture(scope="module")
+def platform(tmp_path_factory):
+    """One shared 10-day run; the scenario tests below each work on top of it, in order."""
+    import os
+    root = tmp_path_factory.mktemp("payrecon")
+    os.environ["PAYRECON_DATA"] = str(root)
+    config.settings.cache_clear()
+    generate(GenConfig(out=root, days=DAYS, orders_per_day=250, n_merchants=40, seed=7))
+    runs = [pipeline.run_day(START + timedelta(days=i)) for i in range(DAYS)]
+    yield {"root": root, "runs": runs}
+    os.environ.pop("PAYRECON_DATA", None)
+    config.settings.cache_clear()
+
+
+def snapshot(root) -> dict:
+    con = duckdb.connect(str(root / "warehouse.duckdb"), read_only=True)
+    try:
+        return {
+            "silver": {t: con.execute(f"SELECT count(*) FROM silver.{t}").fetchone()[0]
+                       for t in ("gateway_txns", "settlements", "orders", "merchants_scd2")},
+            "recon": con.execute("SELECT status, count(*) FROM gold.fact_reconciliation GROUP BY 1 ORDER BY 1").fetchall(),
+            "money": con.execute("SELECT round(sum(money_at_risk), 2) FROM gold.fact_reconciliation").fetchone()[0],
+        }
+    finally:
+        con.close()
+
+
+def test_every_daily_run_succeeds_and_all_dbt_tests_pass(platform):
+    for r in platform["runs"]:
+        assert r.status in ("SUCCESS", "SUCCESS_WITH_WARNINGS"), (r.run_date, r.status, r.error, r.reasons)
+        assert r.dbt is not None and r.dbt.failed == 0 and r.dbt.passed > 30
+
+
+def test_quality_layer_catches_injected_defects(platform):
+    report = evaluate_all()
+    assert report["dq_quarantine"]["recall"] >= 0.99
+    assert report["dq_quarantine"]["precision"] >= 0.97
+
+
+def test_reconciliation_agrees_with_ground_truth(platform):
+    report = evaluate_all()
+    assert report["recon_status_accuracy"] >= 0.97
+    assert report["orphan_settlements"]["recall"] >= 0.95
+    assert report["fuzzy_match"]["fp"] == 0                    # ambiguity must never produce a wrong link
+
+
+def test_no_quarantined_transaction_reaches_gold(platform):
+    con = duckdb.connect(str(platform["root"] / "warehouse.duckdb"), read_only=True)
+    leaked = con.execute("""SELECT count(*) FROM quarantine.rows q JOIN gold.fact_transactions f
+                            ON f.txn_id = q.natural_key
+                            WHERE q.dataset = 'gateway' AND q.rule_ids <> 'GW-UNQ-01'""").fetchone()[0]
+    con.close()
+    assert leaked == 0
+
+
+def test_rerunning_a_day_is_idempotent(platform):
+    before = snapshot(platform["root"])
+    r = pipeline.run_day(LAST)
+    assert r.status in ("SUCCESS", "SUCCESS_WITH_WARNINGS")
+    assert snapshot(platform["root"]) == before
+
+
+def test_bad_schema_halts_the_gate_and_leaves_silver_and_gold_untouched(platform):
+    path = config.source_dir() / "settlements" / f"settlements_{LAST.isoformat()}.csv"
+    original = path.read_text(encoding="utf-8")
+    lines = original.splitlines()
+    header = lines[0].split(",")
+    drop = header.index("gross_amount")
+    path.write_text("\n".join(",".join(v for i, v in enumerate(line.split(",")) if i != drop) for line in lines),
+                    encoding="utf-8")
+    before = snapshot(platform["root"])
+    try:
+        r = pipeline.run_day(LAST)
+        assert r.status == "QUALITY_GATE_FAILED" and r.gate == "HALT"
+        assert any("ST-SCH-01" in reason for reason in r.reasons)
+        assert snapshot(platform["root"]) == before
+    finally:
+        path.write_text(original, encoding="utf-8")
+
+
+def test_api_outage_fails_the_run_cleanly_without_touching_data(platform):
+    before = snapshot(platform["root"])
+    client = ingest.GatewayClient(fail_first=999, sleep=lambda s: None)
+    r = pipeline.run_day(LAST, gateway_client=client)
+    assert r.status == "FAILED" and "gateway API failed" in (r.error or "")
+    assert snapshot(platform["root"]) == before
+    con = duckdb.connect(str(platform["root"] / "warehouse.duckdb"), read_only=True)
+    last = con.execute("SELECT status, error FROM ops.run_log ORDER BY started_at DESC LIMIT 1").fetchone()
+    con.close()
+    assert last[0] == "FAILED"
+
+
+def test_the_pipeline_recovers_on_the_next_run_after_an_outage(platform):
+    r = pipeline.run_day(LAST)
+    assert r.status in ("SUCCESS", "SUCCESS_WITH_WARNINGS")

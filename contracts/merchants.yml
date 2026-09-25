@@ -1,0 +1,12 @@
+dataset: merchants
+description: Merchant master snapshots (weekly CSV) feeding an SCD Type 2 dimension
+weight: 1
+natural_key: merchant_id
+columns:
+  required: [merchant_id, name, category, city, risk_tier, fee_pct]
+  aliases: {}
+rules:
+  - {id: MR-CMP-01, type: not_null, column: merchant_id, severity: CRITICAL, desc: "merchant_id present"}
+  - {id: MR-UNQ-01, type: unique, column: merchant_id, severity: ERROR, desc: "merchant_id unique within the snapshot"}
+  - {id: MR-VAL-01, type: expr, severity: ERROR, desc: "fee_pct numeric in (0, 10]", violation: "pr_amt(fee_pct) IS NULL OR pr_amt(fee_pct) <= 0 OR pr_amt(fee_pct) > 10"}
+  - {id: MR-VAL-02, type: accepted, column: risk_tier, values: [low, medium, high], severity: ERROR, desc: "risk_tier in allowed set"}

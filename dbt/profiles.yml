@@ -1,0 +1,8 @@
+payreconcile:
+  target: dev
+  outputs:
+    dev:
+      type: duckdb
+      path: "{{ env_var('PAYRECON_DB', '../data/warehouse.duckdb') }}"
+      schema: gold
+      threads: 4

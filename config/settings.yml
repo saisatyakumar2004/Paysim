@@ -1,0 +1,36 @@
+# Central tunables. Every threshold here is documented in docs/dq_rules.md.
+
+reconciliation:
+  amount_tolerance: 1.00        # INR; |settled - expected| <= this is MATCHED (rounding)
+  settlement_sla_days: 3        # a captured txn unsettled after this many days is MISSING_SETTLEMENT
+  fuzzy_max_edit_distance: 2    # max Levenshtein distance between gateway txn_id and bank reference
+  duplicate_charge_window_minutes: 10
+
+quality:
+  severity_weights: {CRITICAL: 5, ERROR: 3, WARN: 1}
+  default_warn_at: 0.0          # any violation -> WARNING
+  default_fail_at: 0.10         # >10% violating rows -> FAIL
+  critical_fail_at: 0.02        # >2% violating rows on a CRITICAL rule -> FAIL
+  gate_pass_score: 0.95         # overall >= this and no FAIL -> proceed
+  gate_halt_score: 0.90         # overall < this -> halt Gold build
+  volume:
+    tolerance: 0.40             # +-40% vs trailing median -> WARNING
+    fail_drop: 0.80             # >=80% drop -> FAIL
+    min_history: 3
+  distribution:
+    tolerance: 0.50             # batch mean amount +-50% vs trailing median -> WARNING
+    fail_ratio: 5.0             # >=5x or <=1/5x -> FAIL (unit/scale change)
+    min_history: 3
+  freshness:
+    warn_hours: 24
+    fail_hours: 48
+
+ingestion:
+  orders_overlap_days: 1        # re-read this much before the watermark to catch late updates
+  api_page_size: 500
+  api_max_retries: 3
+  api_backoff_seconds: 0.2
+
+anomaly:
+  contamination: 0.01
+  min_history_days: 7
