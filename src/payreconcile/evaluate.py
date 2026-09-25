@@ -47,6 +47,7 @@ def evaluate_all(db_path=None, truth_path=None) -> dict:
                              "recall": round(len(keys & q_set) / len(keys), 4)}
     report["dq_recall_by_defect"] = by_defect
     repaired = con.execute("SELECT rule_id, sum(violations) FROM ops.dq_results WHERE rule_id LIKE '%FIX%' "
+                           "AND run_id IN (SELECT arg_max(run_id, started_at) FROM ops.run_log GROUP BY run_date) "
                            "GROUP BY 1").fetchall()
     inj = t_dq[t_dq["action"] == "repair"]["defect"].value_counts().to_dict()
     report["dq_repairs"] = {"reported_by_rules": dict(repaired), "injected": inj}

@@ -79,6 +79,16 @@ def test_rerunning_a_day_is_idempotent(platform):
     assert snapshot(platform["root"]) == before
 
 
+def test_replaying_an_old_day_does_not_rewind_the_reconciliation_clock(platform):
+    before = snapshot(platform["root"])
+    r = pipeline.run_day(START + timedelta(days=2))
+    assert r.status in ("SUCCESS", "SUCCESS_WITH_WARNINGS")
+    assert snapshot(platform["root"]) == before
+    con = duckdb.connect(str(platform["root"] / "warehouse.duckdb"), read_only=True)
+    assert con.execute("SELECT max(as_of_date) FROM gold.fact_reconciliation").fetchone()[0] == LAST
+    con.close()
+
+
 def test_bad_schema_halts_the_gate_and_leaves_silver_and_gold_untouched(platform):
     path = config.source_dir() / "settlements" / f"settlements_{LAST.isoformat()}.csv"
     original = path.read_text(encoding="utf-8")
@@ -112,3 +122,12 @@ def test_api_outage_fails_the_run_cleanly_without_touching_data(platform):
 def test_the_pipeline_recovers_on_the_next_run_after_an_outage(platform):
     r = pipeline.run_day(LAST)
     assert r.status in ("SUCCESS", "SUCCESS_WITH_WARNINGS")
+
+
+def test_dashboard_renders_against_the_real_warehouse(platform):
+    pytest.importorskip("streamlit")
+    from streamlit.testing.v1 import AppTest
+    at = AppTest.from_file(str(config.ROOT / "dashboard" / "app.py"), default_timeout=120).run()
+    assert not at.exception and not at.error
+    assert [t.label for t in at.tabs] == ["Reconciliation", "Exceptions", "Data health", "Pipeline health", "Fraud signals"]
+    assert any(m.label == "Money at risk" for m in at.metric)

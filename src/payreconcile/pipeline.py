@@ -168,9 +168,12 @@ def run_day(run_date: date, run_dbt: bool = True, gateway_client: ingest.Gateway
 
             # ---- gold (dbt) ------------------------------------------------------------------------------
             if run_dbt:
+                # A replay of an old day must not rewind the reconciliation clock: as-of = latest day ever loaded.
+                latest = con.execute("SELECT max(run_date) FROM ops.run_log WHERE status LIKE 'SUCCESS%'").fetchone()[0]
+                as_of = max(run_date, latest) if latest else run_date
                 con.close()
                 with _closed_task(run_id, run_date, "dbt_build") as rec:
-                    summary.dbt = transform.build(run_date)
+                    summary.dbt = transform.build(as_of)
                     rec["detail"] = f"pass={summary.dbt.passed} fail={summary.dbt.failed} skipped={summary.dbt.skipped}"
                     rec["status"] = "SUCCESS" if summary.dbt.success else "FAILED"
                 con = db.connect()

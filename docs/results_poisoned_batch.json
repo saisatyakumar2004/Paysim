@@ -1,0 +1,33 @@
+{
+  "clean": {
+    "pipeline_status": "SUCCESS_WITH_WARNINGS",
+    "gate": "WARN",
+    "dq_score": 0.9987,
+    "gate_reasons": [],
+    "silver_mean_captured_amount_on_last_day": 1103.82,
+    "model_status": "OK",
+    "merchants_flagged_on_last_day": 2
+  },
+  "ungated": {
+    "pipeline_status": "SUCCESS_WITH_WARNINGS",
+    "gate": "WARN",
+    "dq_score": 0.9988,
+    "gate_reasons": [
+      "(gate bypassed for demo) gateway: FAIL on GW-DST-01"
+    ],
+    "silver_mean_captured_amount_on_last_day": 110381.62,
+    "model_status": "OK",
+    "merchants_flagged_on_last_day": 24
+  },
+  "gated": {
+    "pipeline_status": "QUALITY_GATE_FAILED",
+    "gate": "HALT",
+    "dq_score": 0.9988,
+    "gate_reasons": [
+      "gateway: FAIL on GW-DST-01"
+    ],
+    "silver_mean_captured_amount_on_last_day": 1103.82,
+    "model_status": "BLOCKED_BY_QUALITY_GATE",
+    "merchants_flagged_on_last_day": null
+  }
+}

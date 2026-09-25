@@ -1,0 +1,28 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install
+        run: pip install -e ".[dev,dashboard]"
+      - name: Lint
+        run: ruff check .
+      - name: Unit tests (data quality engine, silver upserts, ingestion retries)
+        run: pytest -q -m "not slow"
+      - name: End-to-end (generate -> pipeline -> dbt build + tests -> score vs ground truth -> failure scenarios)
+        run: pytest -q -m slow
+      - name: Rule catalogue is in sync with the contracts
+        run: |
+          python scripts/gen_rule_docs.py
+          git diff --exit-code docs/dq_rules.md
