@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sqlite3
 import time
 from datetime import date, datetime, timedelta
@@ -80,9 +81,73 @@ class GatewayClient:
         return to_raw(pd.DataFrame(records))
 
 
-def read_gateway(run_date: date, client: GatewayClient | None = None) -> tuple[pd.DataFrame, str]:
+class HttpGatewayClient:
+    """Reads the gateway feed over HTTP (see gateway_api.py) with a timeout, retries and exponential backoff.
+
+    Retried: connection errors, timeouts, HTTP 429 and 5xx (honouring Retry-After, capped). Not retried: other 4xx
+    (a bad request will not get better) and malformed payloads. All failures end in IngestError.
+    """
+
+    def __init__(self, base_url: str | None = None, client=None, timeout: float | None = None, sleep=time.sleep,
+                 page_size: int | None = None):
+        import httpx  # optional dependency: pip install -e ".[api]"
+        cfg = config.settings()["ingestion"]
+        self._httpx = httpx
+        self.timeout = timeout if timeout is not None else cfg["api_timeout_seconds"]
+        self.page_size = page_size or cfg["api_page_size"]
+        self._http = client or httpx.Client(base_url=base_url or os.environ.get("PAYRECON_API_URL", "http://127.0.0.1:8765"))
+        self._sleep = sleep
+        self.calls = 0
+        self.attempts_log: list[str] = []
+
+    def _get(self, day: date, page: int) -> dict:
+        cfg = config.settings()["ingestion"]
+        max_retries = cfg["api_max_retries"]
+        for attempt in range(1, max_retries + 1):
+            self.calls += 1
+            try:
+                resp = self._http.get("/transactions", params={"date": day.isoformat(), "page": page,
+                                                               "page_size": self.page_size}, timeout=self.timeout)
+            except (self._httpx.TimeoutException, self._httpx.TransportError) as exc:
+                reason, retry_after = f"{type(exc).__name__}", 0.0
+            else:
+                if resp.status_code == 200:
+                    try:
+                        payload = resp.json()
+                        if not isinstance(payload.get("data"), list):
+                            raise ValueError("missing 'data' list")
+                        return payload
+                    except ValueError as exc:
+                        raise IngestError(f"gateway API returned a malformed payload for {day} page {page}: {exc}") from exc
+                if resp.status_code != 429 and resp.status_code < 500:
+                    raise IngestError(f"gateway API rejected the request for {day} page {page}: HTTP {resp.status_code}")
+                reason = f"HTTP {resp.status_code}"
+                try:
+                    retry_after = min(float(resp.headers.get("Retry-After", 0)), cfg["api_backoff_cap_seconds"])
+                except ValueError:
+                    retry_after = 0.0
+            self.attempts_log.append(f"{day} page {page} attempt {attempt}: {reason}")
+            log.warning("gateway %s page %s attempt %s/%s failed: %s", day, page, attempt, max_retries, reason)
+            if attempt == max_retries:
+                raise IngestError(f"gateway API failed after {attempt} attempts for {day} page {page} ({reason})")
+            backoff = min(cfg["api_backoff_seconds"] * 2 ** (attempt - 1), cfg["api_backoff_cap_seconds"])
+            self._sleep(max(backoff, retry_after))
+        raise AssertionError("unreachable")
+
+    def fetch_day(self, day: date) -> pd.DataFrame:
+        records: list[dict] = []
+        page: int | None = 1
+        while page:
+            payload = self._get(day, page)
+            records.extend(payload["data"])
+            page = payload.get("next_page")
+        return to_raw(pd.DataFrame(records))
+
+
+def read_gateway(run_date: date, client: GatewayClient | HttpGatewayClient | None = None) -> tuple[pd.DataFrame, str]:
     client = client or GatewayClient()
-    return client.fetch_day(run_date), f"gateway/{run_date.isoformat()}"
+    src = "gateway-api" if isinstance(client, HttpGatewayClient) else "gateway"
+    return client.fetch_day(run_date), f"{src}/{run_date.isoformat()}"
 
 
 def read_settlements(run_date: date) -> tuple[pd.DataFrame | None, str]:

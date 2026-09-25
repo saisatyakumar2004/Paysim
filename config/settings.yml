@@ -30,6 +30,8 @@ ingestion:
   api_page_size: 500
   api_max_retries: 3
   api_backoff_seconds: 0.2
+  api_backoff_cap_seconds: 5.0  # upper bound for exponential backoff and for a server-supplied Retry-After
+  api_timeout_seconds: 10.0     # per-request timeout for the HTTP gateway client
 
 anomaly:
   contamination: 0.01
