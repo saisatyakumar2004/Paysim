@@ -163,6 +163,8 @@ def test_dashboard_renders_against_the_real_warehouse(platform):
     pytest.importorskip("streamlit")
     from streamlit.testing.v1 import AppTest
     at = AppTest.from_file(str(config.ROOT / "dashboard" / "app.py"), default_timeout=120).run()
-    assert not at.exception and not at.error
-    assert [t.label for t in at.tabs] == ["Reconciliation", "Exceptions", "Data health", "Pipeline health", "Fraud signals"]
+    assert not at.exception, [str(e.value)[:300] for e in at.exception]
+    assert not at.error
+    assert at.title[0].value == "Executive overview"                       # the default page of the 8-page navigation
     assert any(m.label == "Money at risk" for m in at.metric)
+    assert any(m.label == "Match rate" for m in at.metric)

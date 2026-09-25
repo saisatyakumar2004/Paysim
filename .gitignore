@@ -10,3 +10,4 @@ dbt/logs/
 dbt/dbt_packages/
 logs/
 .env
+exports/

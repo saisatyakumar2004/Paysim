@@ -57,6 +57,10 @@ def main(argv: list[str] | None = None) -> int:
     ex = sub.add_parser("explain", help="explain a reconciliation item: evidence, audit history, source records")
     ex.add_argument("item_id", help="e.g. TXN:TXN1234567890, STL:STL000000012, ORD:ORD00000012")
 
+    bi = sub.add_parser("export-bi", help="export a Power BI-ready star schema (CSV + Parquet)")
+    bi.add_argument("--out", default="exports/powerbi")
+    bi.add_argument("--format", choices=["csv", "parquet", "both"], default="both")
+
     sub.add_parser("evaluate", help="score pipeline output against the generator's ground truth")
     sub.add_parser("anomalies", help="train + score the merchant-day anomaly model on trusted data")
     sub.add_parser("reset", help="delete the warehouse and bronze layers (keeps source data)")
@@ -114,6 +118,14 @@ def main(argv: list[str] | None = None) -> int:
             out["vs_dbt_reference"] = reconcile.compare_with_reference(con)
         con.close()
         print(json.dumps(out, indent=2, default=str))
+    elif args.cmd == "export-bi":
+        from pathlib import Path
+
+        from .bi_export import export
+        fmts = ("csv", "parquet") if args.format == "both" else (args.format,)
+        m = export(Path(args.out), fmts)
+        print(json.dumps({"out": args.out, "as_of_date": m["as_of_date"],
+                          "tables": {k: v["rows"] for k, v in m["tables"].items()}}, indent=2))
     elif args.cmd == "explain":
         from . import db
         from .explain import explain
