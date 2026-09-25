@@ -1,0 +1,175 @@
+{
+  "warehouse": "D:\\pay\\data\\warehouse.duckdb",
+  "duplicate_charge": {
+    "truth_duplicates": 694,
+    "missed": 17,
+    "categories": {
+      "original_quarantined_traceable_by_order_id": 14,
+      "original_quarantined_without_order_id": 3
+    },
+    "recall_overall": 0.9755,
+    "recall_when_original_is_trusted": 1.0,
+    "missed_detail": [
+      {
+        "txn_id": "TXN9819423971",
+        "order_id": "ORD00006541",
+        "category": "original_quarantined_traceable_by_order_id",
+        "quarantine_rules_on_order": [
+          "GW-VAL-01"
+        ]
+      },
+      {
+        "txn_id": "TXN1681816950",
+        "order_id": "ORD00008269",
+        "category": "original_quarantined_traceable_by_order_id",
+        "quarantine_rules_on_order": [
+          "GW-VAL-02"
+        ]
+      },
+      {
+        "txn_id": "TXN1436596790",
+        "order_id": "ORD00015821",
+        "category": "original_quarantined_traceable_by_order_id",
+        "quarantine_rules_on_order": [
+          "GW-VAL-04"
+        ]
+      },
+      {
+        "txn_id": "TXN5180736435",
+        "order_id": "ORD00024771",
+        "category": "original_quarantined_traceable_by_order_id",
+        "quarantine_rules_on_order": [
+          "GW-VAL-04"
+        ]
+      },
+      {
+        "txn_id": "TXN2977786307",
+        "order_id": "ORD00024844",
+        "category": "original_quarantined_traceable_by_order_id",
+        "quarantine_rules_on_order": [
+          "GW-VAL-04"
+        ]
+      },
+      {
+        "txn_id": "TXN4102100172",
+        "order_id": "ORD00027007",
+        "category": "original_quarantined_traceable_by_order_id",
+        "quarantine_rules_on_order": [
+          "GW-REF-01"
+        ]
+      },
+      {
+        "txn_id": "TXN9450866664",
+        "order_id": "ORD00029896",
+        "category": "original_quarantined_traceable_by_order_id",
+        "quarantine_rules_on_order": [
+          "GW-VAL-03"
+        ]
+      },
+      {
+        "txn_id": "TXN2245651136",
+        "order_id": "ORD00032641",
+        "category": "original_quarantined_traceable_by_order_id",
+        "quarantine_rules_on_order": [
+          "GW-VAL-02"
+        ]
+      },
+      {
+        "txn_id": "TXN1693444348",
+        "order_id": "ORD00034435",
+        "category": "original_quarantined_traceable_by_order_id",
+        "quarantine_rules_on_order": [
+          "GW-VAL-01"
+        ]
+      },
+      {
+        "txn_id": "TXN8817923380",
+        "order_id": "ORD00036028",
+        "category": "original_quarantined_without_order_id",
+        "quarantine_rules_on_order": []
+      },
+      {
+        "txn_id": "TXN9879234366",
+        "order_id": "ORD00040786",
+        "category": "original_quarantined_traceable_by_order_id",
+        "quarantine_rules_on_order": [
+          "GW-VAL-04"
+        ]
+      },
+      {
+        "txn_id": "TXN3022242429",
+        "order_id": "ORD00046176",
+        "category": "original_quarantined_traceable_by_order_id",
+        "quarantine_rules_on_order": [
+          "GW-VAL-03"
+        ]
+      },
+      {
+        "txn_id": "TXN4344011197",
+        "order_id": "ORD00047406",
+        "category": "original_quarantined_traceable_by_order_id",
+        "quarantine_rules_on_order": [
+          "GW-VAL-03"
+        ]
+      },
+      {
+        "txn_id": "TXN1698023036",
+        "order_id": "ORD00061341",
+        "category": "original_quarantined_traceable_by_order_id",
+        "quarantine_rules_on_order": [
+          "GW-VAL-04"
+        ]
+      },
+      {
+        "txn_id": "TXN9247982054",
+        "order_id": "ORD00069051",
+        "category": "original_quarantined_without_order_id",
+        "quarantine_rules_on_order": []
+      },
+      {
+        "txn_id": "TXN3356328115",
+        "order_id": "ORD00074127",
+        "category": "original_quarantined_traceable_by_order_id",
+        "quarantine_rules_on_order": [
+          "GW-REF-01"
+        ]
+      },
+      {
+        "txn_id": "TXN3656629800",
+        "order_id": "ORD00077964",
+        "category": "original_quarantined_without_order_id",
+        "quarantine_rules_on_order": []
+      }
+    ]
+  },
+  "candidate_rule_order_keyed": {
+    "description": "captured payment whose ORDER also has a quarantined gateway row with a different txn_id",
+    "newly_flagged": 14,
+    "true_duplicates_among_new": 14,
+    "false_positives_among_new": 0,
+    "precision_of_new_flags": 1.0
+  },
+  "candidate_rule_unanchored": {
+    "description": "captured payment with a NULL-order-id quarantined row of the same merchant, amount and time (<=10 min)",
+    "newly_flagged": 3,
+    "true_duplicates_among_new": 3,
+    "false_positives_among_new": 0,
+    "precision_of_new_flags": 1.0
+  },
+  "payment_without_order": {
+    "truth": 609,
+    "flagged": 597,
+    "missed": 12,
+    "false_positives": 0,
+    "missed_with_a_trusted_payment_in_silver": 0,
+    "missed_payments_were_quarantined_by": {
+      "GW-VAL-04": 5,
+      "GW-VAL-01": 2,
+      "GW-REF-01": 3,
+      "GW-VAL-03": 1,
+      "GW-VAL-02": 1
+    },
+    "recall_overall": 0.9803,
+    "recall_on_trusted_payments": 1.0
+  }
+}
