@@ -1,7 +1,7 @@
 """PayReconcile dashboards.
 
 Run:  streamlit run dashboard/app.py
-Eight pages, each with its own URL (/overview, /reconciliation, /exceptions, /data-quality, /settlement, /merchant-risk,
+Eight pages, each with its own URL (/ = overview, /reconciliation, /exceptions, /data-quality, /settlement, /merchant-risk,
 /anomalies, /pipeline). Reads the warehouse read-only; nothing here can modify data.
 """
 

@@ -139,6 +139,12 @@ def run_day(run_date: date, run_dbt: bool = True, gateway_client: ingest.Gateway
             if "settlements" in raw:
                 extra.append(dq.volume_check("settlements", len(raw["settlements"]),
                                              _history(con, "settlements", run_date)))
+                st = results["settlements"]
+                if not st.schema_failed and len(st.good):          # an EMPTY feed is caught by the volume check instead
+                    con.register("st_good", st.good)
+                    newest_bank = con.execute("SELECT max(try_cast(trim(settlement_date) AS DATE)) FROM st_good").fetchone()[0]
+                    con.unregister("st_good")
+                    extra.append(dq.freshness_check("settlements", newest_bank, run_date))
             stats = _batch_stats(con, raw, results)
             for (ds, metric), value in stats.items():
                 extra.append(dq.distribution_check(ds, metric, value, _stat_history(con, ds, metric, run_date)))

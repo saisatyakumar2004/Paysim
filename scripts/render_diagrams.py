@@ -81,61 +81,76 @@ def architecture() -> str:
     parts.append(arrow(1195, 400, 1195, 428))
     parts.append(arrow(1310, 160, 1360, 160))
     parts.append(arrow(1310, 300, 1360, 300, dashed=True))
-    parts.append(arrow(1310, 480, 1360, 450))
-    parts.append(arrow(920, 318, 920, 292, label="release"))
+    parts.append("<polyline points='1020,262 1050,262 1050,552 1420,552 1420,528' fill='none' stroke='#5b6b7f' stroke-width='1.8' "
+                 "stroke-dasharray='5 4' marker-end='url(#arr)'/>")
+    parts.append(f"<text x='1240' y='546' {FONT} font-size='10.5' fill='#5b6b7f' text-anchor='middle'>trusted Silver rows only</text>")
+    parts.append(arrow(920, 318, 920, 292))
+    parts.append(f"<text x='930' y='308' {FONT} font-size='10.5' fill='#5b6b7f'>release</text>")
     parts.append("</svg>")
     return "\n".join(parts)
 
 
 def lineage(manifest_path: Path) -> str:
+    """Two panels from the manifest: the daily build (sources -> models) and the reference full-rebuild oracle."""
     m = json.loads(manifest_path.read_text(encoding="utf-8"))
     nodes: dict[str, dict] = {}
     for uid, n in {**m["nodes"], **m["sources"]}.items():
-        if n["resource_type"] in ("model", "source"):
-            label = n["name"] if n["resource_type"] == "model" else f"{n['source_name']}.{n['name']}"
-            if n["resource_type"] == "model":
-                kind = "reference" if "reference" in n.get("tags", []) else "mart"
-            else:
-                kind = "source"
-            nodes[uid] = {"label": label, "kind": kind}
+        if n["resource_type"] == "model":
+            nodes[uid] = {"label": n["name"], "kind": "reference" if "reference" in n.get("tags", []) else "mart"}
+        elif n["resource_type"] == "source":
+            nodes[uid] = {"label": f"{n['source_name']}.{n['name']}", "kind": "source"}
     edges = [(p, c) for c, parents in m["parent_map"].items() if c in nodes for p in parents if p in nodes]
-    depth: dict[str, int] = {}
-
-    def d(u: str, seen=()) -> int:
-        if u in depth:
-            return depth[u]
-        ps = [p for p, c in edges if c == u and p not in seen]
-        depth[u] = 0 if not ps else 1 + max(d(p, (*seen, u)) for p in ps)
-        return depth[u]
-
-    for u in nodes:
-        d(u)
-    cols: dict[int, list[str]] = {}
-    for u in sorted(nodes, key=lambda k: (depth[k], nodes[k]["label"])):
-        cols.setdefault(depth[u], []).append(u)
-    w, h, gx, gy = 230, 30, 90, 14
-    pos = {}
-    for c, us in cols.items():
-        for i, u in enumerate(us):
-            pos[u] = (40 + c * (w + gx), 90 + i * (h + gy))
-    width = 80 + (max(cols) + 1) * (w + gx)
-    height = 130 + max(len(v) for v in cols.values()) * (h + gy)
+    w, h, gx, gy = 220, 28, 80, 12
     colors = {"source": ("#f4f1ea", "#8a7a55"), "reference": ("#f8efe6", "#b0763a"), "mart": ("#e8f0fa", "#4a79b0")}
-    parts = [f"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 {width} {height}' width='{width}' height='{height}'>",
-             "<defs><marker id='arr' markerWidth='8' markerHeight='6' refX='7' refY='3' orient='auto'><path d='M0,0 L8,3 L0,6 z' fill='#8a97a8'/></marker></defs>",
-             f"<rect width='{width}' height='{height}' fill='#ffffff'/>",
-             f"<text x='40' y='34' {FONT} font-size='20' font-weight='700' fill='#1b2a3a'>dbt lineage (generated from manifest.json)</text>",
-             f"<text x='40' y='56' {FONT} font-size='12' fill='#5b6b7f'>grey = source tables, blue = models built in the daily run, orange = reference (full-rebuild oracle) models, excluded from the daily build</text>"]
-    for p, c in edges:
-        (x1, y1), (x2, y2) = pos[p], pos[c]
-        parts.append(f"<path d='M{x1 + w},{y1 + h / 2} C{x1 + w + 40},{y1 + h / 2} {x2 - 40},{y2 + h / 2} {x2},{y2 + h / 2}' fill='none' "
-                     f"stroke='#b5bfcc' stroke-width='1.2' marker-end='url(#arr)'/>")
-    for u, (x, y) in pos.items():
-        fill, stroke = colors[nodes[u]["kind"]]
-        parts.append(f"<rect x='{x}' y='{y}' width='{w}' height='{h}' rx='6' fill='{fill}' stroke='{stroke}'/>"
-                     f"<text x='{x + 10}' y='{y + 20}' {FONT} font-size='12' fill='#1b2a3a'>{escape(nodes[u]['label'])}</text>")
-    parts.append("</svg>")
-    return "\n".join(parts)
+
+    def panel(kind: str, title: str, y0: int) -> tuple[list[str], int, int]:
+        models = {u for u, n in nodes.items() if n["kind"] == kind}
+        used = set(models) | {p for p, c in edges if c in models}
+        sub = [(p, c) for p, c in edges if c in models and p in used]
+        depth: dict[str, int] = {}
+
+        def d(u: str) -> int:
+            if u not in depth:
+                ps = [p for p, c in sub if c == u]
+                depth[u] = 0 if not ps else 1 + max(d(p) for p in ps)
+            return depth[u]
+
+        for u in used:
+            d(u)
+        cols: dict[int, list[str]] = {}
+        for u in sorted(used, key=lambda k: (depth[k], nodes[k]["label"])):
+            cols.setdefault(depth[u], []).append(u)
+        y_of: dict[str, float] = {u: i for i, u in enumerate(cols.get(0, []))}
+        for c in sorted(cols):                       # barycentre ordering: place a node near the average of its parents
+            if c == 0:
+                continue
+            cols[c].sort(key=lambda u: sum(y_of[p] for p, cc in sub if cc == u) / max(1, sum(1 for _, cc in sub if cc == u)))
+            for i, u in enumerate(cols[c]):
+                y_of[u] = i
+        pos = {u: (40 + c * (w + gx), y0 + 40 + i * (h + gy)) for c, us in cols.items() for i, u in enumerate(us)}
+        width = 80 + (max(cols) + 1) * (w + gx)
+        height = 40 + max(len(v) for v in cols.values()) * (h + gy) + 20
+        out = [f"<text x='40' y='{y0 + 20}' {FONT} font-size='14' font-weight='700' fill='#1b2a3a'>{escape(title)}</text>"]
+        for p_, c_ in sub:
+            (x1, y1), (x2, y2) = pos[p_], pos[c_]
+            out.append(f"<path d='M{x1 + w},{y1 + h / 2} C{x1 + w + 40},{y1 + h / 2} {x2 - 40},{y2 + h / 2} {x2},{y2 + h / 2}' fill='none' "
+                       f"stroke='#b5bfcc' stroke-width='1.2' marker-end='url(#arr)'/>")
+        for u, (x, y) in pos.items():
+            fill, stroke = colors[nodes[u]["kind"]]
+            out.append(f"<rect x='{x}' y='{y}' width='{w}' height='{h}' rx='6' fill='{fill}' stroke='{stroke}'/>"
+                       f"<text x='{x + 10}' y='{y + 19}' {FONT} font-size='12' fill='#1b2a3a'>{escape(nodes[u]['label'])}</text>")
+        return out, width, height
+
+    top, w1, h1 = panel("mart", "Daily build: sources -> models (45 dbt tests run on these)", 70)
+    bottom, w2, h2 = panel("reference", "Reference oracle: independent full-rebuild reconciliation (run on demand, excluded from the daily build)", 70 + h1 + 30)
+    width, height = max(w1, w2, 900), 70 + h1 + 30 + h2 + 20
+    return chr(10).join([
+        f"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 {width} {height}' width='{width}' height='{height}'>",
+        "<defs><marker id='arr' markerWidth='8' markerHeight='6' refX='7' refY='3' orient='auto'><path d='M0,0 L8,3 L0,6 z' fill='#8a97a8'/></marker></defs>",
+        f"<rect width='{width}' height='{height}' fill='#ffffff'/>",
+        f"<text x='40' y='34' {FONT} font-size='20' font-weight='700' fill='#1b2a3a'>dbt lineage (generated from manifest.json)</text>",
+        f"<text x='40' y='54' {FONT} font-size='12' fill='#5b6b7f'>grey = source tables (silver.*, quarantine.*, recon.* engine-owned), blue = models, orange = reference models</text>",
+        *top, *bottom, "</svg>"])
 
 
 def main() -> int:

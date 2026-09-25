@@ -102,7 +102,8 @@ def render() -> None:
     rows = getattr(getattr(event, "selection", None), "rows", []) if event is not None else []
     if rows:
         selected = df.iloc[rows[0]]["item_id"]
-    item_id = st.text_input("Item id (select a row above, or paste e.g. TXN:TXN1234567890)", selected or "")
+    item_id = st.text_input("Item id (select a row above, or paste e.g. TXN:TXN1234567890)",
+                            selected or st.query_params.get("item", ""))
     if item_id:
         con = db.connect(read_only=True)
         try:

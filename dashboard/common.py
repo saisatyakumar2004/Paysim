@@ -59,14 +59,15 @@ def kpi_help(key: str) -> str:
 
 
 def age_bucket(days: int) -> str:
-    for lo, hi, label in AGE_BUCKETS:
+    """Bucket label prefixed with its rank ("1. 0-3 days") so charts that sort labels alphabetically keep age order."""
+    for i, (lo, hi, label) in enumerate(AGE_BUCKETS, start=1):
         if lo <= days <= hi:
-            return label
-    return AGE_BUCKETS[-1][2]
+            return f"{i}. {label}"
+    return f"{len(AGE_BUCKETS)}. {AGE_BUCKETS[-1][2]}"
 
 
 def bucket_order() -> list[str]:
-    return [b[2] for b in AGE_BUCKETS]
+    return [f"{i}. {b[2]}" for i, b in enumerate(AGE_BUCKETS, start=1)]
 
 
 def guard() -> None:

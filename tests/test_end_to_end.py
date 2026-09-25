@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from datetime import date, timedelta
 
 import duckdb
@@ -122,6 +123,24 @@ def test_replaying_an_old_day_does_not_rewind_the_reconciliation_clock(platform)
     con = duckdb.connect(str(platform["root"] / "warehouse.duckdb"), read_only=True)
     assert con.execute("SELECT as_of_date FROM ops.recon_state WHERE id = 1").fetchone()[0] == LAST
     con.close()
+
+
+def test_a_stale_bank_file_halts_the_gate_on_freshness(platform):
+    """Settlements had volume and distribution checks; a file whose newest record is weeks old must also stop the batch."""
+    path = config.source_dir() / "settlements" / f"settlements_{LAST.isoformat()}.csv"
+    original = path.read_text(encoding="utf-8")
+    header, *rows = original.splitlines()
+    idx = header.split(",").index("settlement_date")
+    stale = [",".join("2025-12-01" if i == idx else v for i, v in enumerate(r.split(","))) for r in rows]
+    path.write_text(os.linesep.join([header, *stale]), encoding="utf-8")
+    before = snapshot(platform["root"])
+    try:
+        r = pipeline.run_day(LAST, run_dbt=False)
+        assert r.status == "QUALITY_GATE_FAILED" and r.gate == "HALT"
+        assert any("ST-FRS-01" in reason for reason in r.reasons), r.reasons
+        assert snapshot(platform["root"]) == before
+    finally:
+        path.write_text(original, encoding="utf-8")
 
 
 def test_bad_schema_halts_the_gate_and_leaves_silver_and_gold_untouched(platform):
