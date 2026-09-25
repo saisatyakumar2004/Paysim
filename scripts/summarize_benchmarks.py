@@ -210,6 +210,22 @@ def main() -> int:
             if s.get("dashboard"):
                 lines += ["", f"Dashboard first render (Streamlit AppTest, executive page): {s['dashboard']}"]
             lines.append("")
+    api = load("results_api_*.json")
+    if api:
+        a = api[-1]
+        lines += ["## Experiment 4: local gateway API vs file source", "",
+                  f"Source: `{a['file']}` ({a['run_at']}; FastAPI {a['fastapi']}, uvicorn {a['uvicorn']}, httpx {a['httpx']}). "
+                  f"{a['note']}.", "",
+                  "| Page size | Records (10 days) | Requests per day | HTTP median per day | Files median per day | Identical to file source |",
+                  "|---|---|---|---|---|---|"]
+        for r in a["fetch"]:
+            lines.append(f"| {r['page_size']} | {r['records']:,} | {r['http_requests_per_day']} | {r['http_median_s_per_day'] * 1000:.0f} ms | "
+                         f"{r['file_median_s_per_day'] * 1000:.0f} ms | {r['identical_to_file_source']} |")
+        r2, t2 = a["retry_after_two_503"], a["timeout_vs_slow_server"]
+        lines += ["", f"* **Retry with backoff:** two injected HTTP 503s, then success: {r2['records']:,} records in {r2['seconds']} s "
+                  f"(expected backoff {r2['expected_backoff_seconds']} s). Attempts logged: {'; '.join(r2['attempt_log'])}.",
+                  f"* **Timeout:** client timeout {t2['client_timeout_s']} s against a server delaying {t2['server_delay_s']} s: {t2['outcome']} "
+                  f"after {t2['attempts']} attempts in {t2['seconds_until_giving_up']} s.", ""]
     (DOCS / "benchmarks.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     print("wrote docs/benchmarks.md")
     return 0

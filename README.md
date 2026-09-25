@@ -171,7 +171,7 @@ python -m payreconcile replay --dataset gateway --date 2026-01-05
 python -m payreconcile serve-api --port 8765                  # local gateway API; then: run --date ... --source api
 python -m payreconcile export-bi --out exports/powerbi        # Power BI-ready tables
 streamlit run dashboard/app.py                                # 8-page dashboard
-pytest                                                        # 139 tests (~6 min)
+pytest                                                        # 139 tests (167 s measured on an idle machine)
 python scripts/benchmark_partitioning.py --scales 1,10,25     # the partitioning experiment (needs psutil)
 python scripts/scan_secrets.py                                # secrets / personal-data scan
 ```
