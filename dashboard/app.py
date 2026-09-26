@@ -1,8 +1,9 @@
 """PayReconcile dashboards.
 
 Run:  streamlit run dashboard/app.py
-Nine pages, each with its own URL (/ = money-flow, /overview, /reconciliation, /exceptions, /data-quality, /settlement,
-/merchant-risk, /anomalies, /pipeline). Reads the warehouse read-only; nothing here can modify data.
+Two groups. PayReconcile: nine pages (/ = money-flow, /overview, /reconciliation, /exceptions, /data-quality, /settlement,
+/merchant-risk, /anomalies, /pipeline). PaySim analytics: seven pages (/paysim-overview, /paysim-transactions, /paysim-fraud,
+/paysim-balance, /paysim-accounts, /paysim-data-quality, /paysim-models). Reads the databases read-only; nothing here can modify data.
 """
 
 from __future__ import annotations
@@ -23,6 +24,13 @@ from views import (  # noqa: E402
     merchant_risk,
     money_flow,
     pipeline_health,
+    ps_account,
+    ps_balance,
+    ps_dq,
+    ps_fraud,
+    ps_model,
+    ps_overview,
+    ps_transactions,
     reconciliation,
     settlement,
 )
@@ -41,5 +49,18 @@ PAGES = [
     ("Pipeline Health", "pipeline", pipeline_health.render, False),
 ]
 
-navigation = st.navigation([st.Page(fn, title=title, url_path=path, default=default) for title, path, fn, default in PAGES])
+PAYSIM_PAGES = [
+    ("PaySim Overview", "paysim-overview", ps_overview.render),
+    ("Transaction Analysis", "paysim-transactions", ps_transactions.render),
+    ("Fraud Analysis", "paysim-fraud", ps_fraud.render),
+    ("Balance Integrity", "paysim-balance", ps_balance.render),
+    ("Account Investigation", "paysim-accounts", ps_account.render),
+    ("PaySim Data Quality", "paysim-data-quality", ps_dq.render),
+    ("Model Evaluation", "paysim-models", ps_model.render),
+]
+
+navigation = st.navigation({
+    "PayReconcile": [st.Page(fn, title=title, url_path=path, default=default) for title, path, fn, default in PAGES],
+    "PaySim analytics": [st.Page(fn, title=title, url_path=path) for title, path, fn in PAYSIM_PAGES],
+})
 navigation.run()

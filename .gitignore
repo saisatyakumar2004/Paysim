@@ -11,3 +11,5 @@ dbt/dbt_packages/
 logs/
 .env
 exports/
+PS_*.csv
+*.csv.gz

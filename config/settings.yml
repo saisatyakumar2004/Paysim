@@ -42,3 +42,22 @@ ingestion:
 anomaly:
   contamination: 0.01
   min_history_days: 7
+
+# PaySim analytics (independent of the PayReconcile pipeline above; see README).
+paysim:
+  source_file: PS_20174392719_1491204439457_log.csv   # relative to the repository root unless absolute; env PAYSIM_SOURCE overrides
+  seed: 42
+  dev_rows: 250000
+  dev_fraud_fraction: 0.25      # share of each (type, fraud) stratum kept for FRAUD rows in the development sample; the rest is proportional
+  balance_tolerance: 0.011      # INR; measured: consistent rows differ from the equation by <0.005 or exactly one cent of rounding
+  valid_types: [CASH_IN, CASH_OUT, DEBIT, PAYMENT, TRANSFER]
+  hours_per_day: 24             # `step` is one hour of the simulation
+  memory_limit: 3GB
+  threads: 4
+  ml:
+    train_end_fraction: 0.70    # temporal split on `step`: train <= 70 % of the step range
+    validation_end_fraction: 0.85   # validation up to 85 %, test after
+    negatives_per_positive: 20  # training only: deterministic undersampling of non-fraud rows
+    random_state: 42
+    rf_trees: 200
+    audit_flag_auc: 0.99        # a single feature this predictive is reported as suspicious

@@ -12,8 +12,10 @@ The finished system answers, from `python -m payreconcile money-flow`:
 
 > INR X was expected from customers (orders). INR Y reached the gateway (INR R refunded). INR Z should have settled after fees (INR F). INR A reached the bank. The merchant-side amount is not in the source data, so the chain stops at the bank. INR C is currently unexplained, a further INR D cannot be judged because evidence is blocked or ambiguous, and INR E is explained. The earliest confirmed breakpoint is STAGE, supported by chain ids.
 
+This repository holds two analytics projects on one local DuckDB + Parquet + Streamlit platform: **Part 1, PayReconcile** (order -> gateway -> bank money-flow reconciliation, below) and **[Part 2, PaySim](#part-2-paysim-transaction-and-fraud-analytics)** (a 6.36-million-row transaction and fraud-analytics pipeline). They share tooling, not data: PaySim has no orders, gateway or settlements.
+
 ## Contents
-[Architecture](#architecture-and-data-flow) · [Source data](#source-data-what-the-model-can-and-cannot-see) · [Setup and commands](#setup-and-commands) · [Reconciliation engine](#reconciliation-engine) · [Money-flow methodology](#money-flow-methodology) · [Ground truth](#ground-truth-and-evaluation) · [Dashboard](#dashboard) · [Power BI](#power-bi-export) · [Testing](#testing) · [Measured results](#measured-results) · [Limitations](#limitations)
+[Architecture](#architecture-and-data-flow) · [Source data](#source-data-what-the-model-can-and-cannot-see) · [Setup and commands](#setup-and-commands) · [Reconciliation engine](#reconciliation-engine) · [Money-flow methodology](#money-flow-methodology) · [Ground truth](#ground-truth-and-evaluation) · [Dashboard](#dashboard) · [Power BI](#power-bi-export) · [Testing](#testing) · [Measured results](#measured-results) · [Limitations](#limitations) · [Part 2: PaySim](#part-2-paysim-transaction-and-fraud-analytics)
 
 ## Architecture and data flow
 
@@ -202,7 +204,7 @@ Eight further pages remain: Executive Overview, Reconciliation, Exceptions Queue
 
 ## Testing
 
-**197 tests** (139 before this change), 275 s for the whole suite on this machine. Data-quality engine 20, Silver and ingestion 12, local API 16, reconciliation 36, money flow 50, replay 9, failure recovery 4, anomaly leakage 7, dashboard and export 29, end-to-end with dbt 14.
+**197 PayReconcile tests** (139 before the money-flow change); with the 41 PaySim tests ([Part 2](#part-2-paysim-transaction-and-fraud-analytics)) the whole suite is **238 tests**, about 250 s on this machine. Data-quality engine 20, Silver and ingestion 12, local API 16, reconciliation 36, money flow 50, replay 9, failure recovery 4, anomaly leakage 7, dashboard and export 29, end-to-end with dbt 14.
 
 - `tests/test_money_flow.py` (33): one hand-computed scenario per way money can stop matching, on the real Silver upserts and reconciliation engine. Order 1,000 at 2 % must give a fee of 20 and an expected settlement of 980. Covered: perfect match, gateway mismatch, bank mismatch, fee mismatch, wrong-merchant credit (and that no merchant amount is ever produced), missing, pending, delayed and early settlement, duplicate settlement, two records that are neither split nor duplicate, split settlement, duplicate payment (confirmed and suspected), refunds (over-refund, two refunds, wrong bank amount, orphan), quarantined gateway record, quarantined bank record, quarantined fee row, halted batch, payment without order, order without payment, orphan settlement, aggregated settlement, same amount under a different reference, an amount that is not a candidate, an unexplained net, traceability, the headline sentence, the conservation checks, idempotence.
 - `tests/test_money_flow_truth.py` (17): generate, run the pipeline, score against the injected truth (population, detection, stage, amounts, each injected scenario, known limits reported), the SQL clean path equals the reference path exactly, incremental equals full reconciliation, replay changes nothing, and a real quality-gate halt blocks dependent conclusions instead of calling money missing.
@@ -306,4 +308,259 @@ Standalone on the final state: money-flow build 3.19 s (SQL clean path for 74,32
 
 ## Repository layout
 
-`src/payreconcile/` (`ingest`, `dq`, `silver`, `reconcile`, `moneyflow`, `truth`, `generate`, `evaluate`, `pipeline`, `replay`, `bi_export`, `cli`), `contracts/` (data-quality rules per source), `config/settings.yml` (tolerances, SLA, money-flow parameters), `dbt/` (marts, tests, reference oracle), `dashboard/`, `tests/`, `scripts/` (CI smoke test, secrets scan, poisoned-batch demo, benchmarks that write to `data/benchmarks/`).
+`src/payreconcile/paysim/` (PaySim pipeline: `profile`, `sample`, `bronze`, `quality`, `gold`, `features`, `ml`, `export`, `benchmark`, `queries`), `src/payreconcile/` (`ingest`, `dq`, `silver`, `reconcile`, `moneyflow`, `truth`, `generate`, `evaluate`, `pipeline`, `replay`, `bi_export`, `cli`), `contracts/` (data-quality rules per source), `config/settings.yml` (tolerances, SLA, money-flow parameters), `dbt/` (marts, tests, reference oracle), `dashboard/`, `tests/`, `scripts/` (CI smoke test, secrets scan, poisoned-batch demo, benchmarks that write to `data/benchmarks/`).
+
+---
+
+# Part 2: PaySim transaction and fraud analytics
+
+A large-file data-engineering and fraud-analytics pipeline on the PaySim mobile-money log (6.36 million transactions), built on DuckDB and Parquet and independent of the PayReconcile pipeline above. **PaySim has no orders, payment gateway, bank settlement or merchant receipt, so none of that is modelled here** and the money-flow model above is untouched. The financial flow of this dataset is what its fields carry:
+
+```
+origin account -> transaction -> destination account -> balance changes
+```
+
+Labels used throughout: **[fact]** a measured property of the dataset, **[measured]** a result produced by the commands below, **[design]** a decision, **[limit]** a limitation.
+
+## 1. Business problem
+
+Given a stream of account-to-account transactions with before/after balances: how much data is bad, do the balances obey accounting logic, where is the fraud, does the existing rule (`isFlaggedFraud`) catch it, and can a model do better without cheating on the label. The pipeline has to do this on the full file on a laptop, and be the same code on a small sample.
+
+## 2. Dataset
+
+**[fact]** `PS_20174392719_1491204439457_log.csv`, 493,534,783 bytes, **6,362,620 rows** (the brief assumed about 6.8 million; the file has 6.36 million), 11 columns, no nulls, no exact duplicate rows, `step` 1 to 743 (one simulated hour per step, 31 days).
+
+| Column | Type | Meaning / measured fact |
+|---|---|---|
+| `step` | int | simulation hour, 1 to 743; volume collapses after the first days |
+| `type` | text | CASH_OUT 2,237,500 · PAYMENT 2,151,495 · CASH_IN 1,399,284 · TRANSFER 532,909 · DEBIT 41,432 |
+| `amount` | double | total 1,144,392,944,760; mean 179,862; median 74,872; min 0 (16 rows); max 92,445,517 |
+| `nameOrig`, `nameDest` | text | 6,353,307 distinct origins (all customers); 2,722,362 distinct destinations, 2,150,401 of them merchants (`M...`) |
+| `oldbalanceOrg`, `newbalanceOrig` | double | origin balance before and after |
+| `oldbalanceDest`, `newbalanceDest` | double | destination balance before and after (always 0 for merchants) |
+| `isFraud` | 0/1 | the label: 8,213 rows (0.129 %), only in TRANSFER (4,097) and CASH_OUT (4,116); fraud amount 12.06 billion |
+| `isFlaggedFraud` | 0/1 | the source's own rule: 16 rows, all TRANSFER, all actually fraud |
+
+The source file is never modified (a test hashes it before and after). `python -m payreconcile paysim profile --dataset full` writes all of this to `data/paysim/full/profile.json` from the data, not from constants.
+
+## 3. Architecture and data flow
+
+```
+PS_..._log.csv (immutable)
+   |-- sample --> data/raw/paysim_dev_250k.parquet (+ .meta.json)         development sample
+   v
+Bronze   data/paysim/<dataset>/bronze.parquet   source fields unchanged + source_row_number, ingestion_timestamp, source_file
+   v
+Silver   paysim.duckdb  silver.transactions     typed, balance-consistency classified, warnings tagged
+                        silver.dq_quarantine    rows rejected by an ERROR rule, with reasons
+                        silver.dq_results       one row per rule
+   v
+Gold     gold.fact_transactions  gold.fact_fraud  gold.transaction_type_summary  gold.balance_quality  gold.fraud_daily_summary
+         gold.account_activity   gold.fraud_account_summary  gold.fraud_flag_performance
+         gold.model_metrics / model_feature_importance / model_pr_curve / model_feature_audit / model_run
+   v
+Streamlit (7 pages)  and  exports/paysim/<dataset>/*.parquet|csv  (Power BI-ready)
+```
+
+**[design]** One DuckDB file and one Bronze file per dataset (`dev`, `full`, `sample_<rows>`), so the same code runs on 250 thousand, 1 million and 6.36 million rows. Everything heavy is DuckDB SQL over Parquet; pandas is used only for the model matrices (a temporal-split training sample and the validation and test windows), never for the raw file. dbt is not used for PaySim: the existing dbt project is bound to the PayReconcile warehouse, and the SQL here is versioned and covered by tests; that is a choice, not a limitation of the tools. No Spark, Kafka or Airflow: the measured full run takes about 3 minutes on a laptop.
+
+## 4. Data quality
+
+`silver.dq_results` has one row per rule: `rule_name`, `total_checked`, `failed_count`, `pass_rate`, `severity` (plus a description). **ERROR** rows are quarantined with their reasons and are not loaded into Silver; **WARNING** rows are kept and the rule names are stored on the row (`dq_warning_rules`); **INFO** records limits of the evidence. Nothing is dropped silently, and a test asserts `bronze = silver + quarantined` for every run.
+
+| Severity | Rules |
+|---|---|
+| ERROR | `required_columns`, `null_or_unparseable_fields`, `invalid_step`, `negative_amount`, `invalid_transaction_type`, `invalid_fraud_flag`, `negative_balance` |
+| WARNING | `zero_amount`, `duplicate_records`, `origin_equals_destination`, `origin_overdraw` (a debit larger than the balance held: an impossible movement), `flag_outside_transfer`, `origin_balance_inconsistent`, `destination_balance_inconsistent` |
+| INFO | `origin_balance_evidence_missing`, `destination_balance_evidence_missing`, `destination_is_merchant` |
+
+**[design]** Duplicates are flagged, not removed: the data has no transaction id, so two identical rows can be two real transactions. A 64-bit hash finds candidates and equality is then checked exactly. If the source cannot be parsed with the declared types it is re-read as text (nothing dropped) and the values that cannot be typed are quarantined.
+
+**[measured] full dataset, 6,362,620 rows**
+
+| Rule | Checked | Failed | Severity |
+|---|---|---|---|
+| all 6 row-level ERROR rules, `required_columns` (11) | 6,362,620 | 0 | ERROR |
+| `zero_amount` | 6,362,620 | 16 | WARNING |
+| `duplicate_records`, `origin_equals_destination` | 6,362,620 | 0 | WARNING |
+| `flag_outside_transfer` | 16 | 0 | WARNING |
+| `origin_overdraw` | 4,963,320 | 3,601,544 (72.6 %) | WARNING |
+| `origin_balance_inconsistent` | 4,273,635 | 1,512,627 (35.4 %) | WARNING |
+| `destination_balance_inconsistent` | 4,045,338 | 474,632 (11.7 %) | WARNING |
+| `origin_balance_evidence_missing` | 6,362,620 | 2,088,985 (32.8 %) | INFO |
+| `destination_balance_evidence_missing` | 4,211,125 | 165,787 (3.9 %) | INFO |
+| `destination_is_merchant` | 6,362,620 | 2,151,495 (33.8 %) | INFO |
+
+Nothing is quarantined: the file is structurally clean. The warnings are properties of the simulator's balances, not corrupt rows. The ERROR paths are exercised by tests on a hand-built file with one row of each kind of invalid record.
+
+## 5. Financial consistency analysis
+
+Rules derived from the data (each measured on the full file before it was written down), not one equation for every type:
+
+| | Origin (always a customer) | Destination |
+|---|---|---|
+| CASH_IN | expected new = old **+** amount | agent pays out: expected new = old **-** amount |
+| TRANSFER, CASH_OUT, DEBIT | expected new = old **-** amount | expected new = old **+** amount |
+| PAYMENT | expected new = old **-** amount | merchant: `NOT_APPLICABLE` (balances are 0 in 100 % of rows, so no evidence exists) |
+
+Per side: `CONSISTENT` if `abs(new - expected) <= 0.011`, `INCONSISTENT` otherwise, `INSUFFICIENT_EVIDENCE` if the opening and closing balance are both 0 (the balances are not recorded, so the equation cannot be tested and is never called consistent), `NOT_APPLICABLE` for merchants. The tolerance is data-derived: on rows that satisfy the equation the error is either below 0.005 or exactly one cent of rounding. Row status: `INCONSISTENT` if either side is, else `INSUFFICIENT_EVIDENCE` if either side is, else `CONSISTENT`. Columns: `expected_new_balance_org/dest`, `origin_balance_error`, `destination_balance_error` (NULL where not evaluable), `origin_balance_consistent`, `destination_balance_consistent` (NULL where not evaluable), `balance_consistency_status`.
+
+**[measured] full dataset, row status by type**
+
+| Type | Rows | Consistent | Inconsistent | Insufficient evidence |
+|---|---|---|---|---|
+| CASH_OUT | 2,237,500 | 233,314 | 1,078,940 | 925,246 |
+| PAYMENT | 2,151,495 | 1,050,371 | 326,879 | 774,245 |
+| CASH_IN | 1,399,284 | 1,032,039 | 207,240 | 160,005 |
+| TRANSFER | 532,909 | 19,230 | 254,243 | 259,436 |
+| DEBIT | 41,432 | 27,240 | 8,588 | 5,604 |
+| All | 6,362,620 | 2,362,194 | 1,875,890 | 2,124,536 |
+
+**[fact]** Only about 37 % of rows satisfy the accounting logic, and 72.6 % of debits move more than the recorded balance. That is how this simulator writes balances, and it is why "inconsistent" here is a finding about the data, not a fraud signal.
+
+## 6. Fraud analytics
+
+`isFraud` is the label; `isFlaggedFraud` is the existing rule. Accuracy is never reported alone: predicting "never fraud" would score 99.87 %.
+
+**[measured] the existing flag against the label, full dataset**
+
+| Scope | TP | FP | TN | FN | Precision | Recall | F1 |
+|---|---|---|---|---|---|---|---|
+| All | 16 | 0 | 6,354,407 | 8,197 | 1.000 | 0.0019 | 0.0039 |
+| TRANSFER | 16 | 0 | 528,812 | 4,081 | 1.000 | 0.0039 | 0.0078 |
+| CASH_OUT | 0 | 0 | 2,233,384 | 4,116 | n/a | 0.0000 | n/a |
+
+The rule is perfectly precise and catches 0.19 % of the fraud. Fraud is 0.77 % of TRANSFER and 0.18 % of CASH_OUT. Gold also holds fraud per day and type, per account (16,382 accounts took part in fraud; none both received and forwarded fraud funds in this data), the amount distribution, and every fraud or flagged transaction with its outcome (TP / FP / FN).
+
+**[fact]** A simulator artifact drives the model results below: among TRANSFER and CASH_OUT, **0 of 2,762,196 legitimate rows** have an opening origin balance exactly equal to the amount, versus **8,034 of 8,213 fraud rows** (97.8 %).
+
+## 7. Feature engineering
+
+28 inputs, all declared in `paysim/features.py` with a definition and a NULL rule; SQL in `FEATURE_EXPR` builds them from `gold.fact_transactions`.
+
+| Group | Features |
+|---|---|
+| Amount | `amount`, `log_amount` (ln(1 + amount)) |
+| Balances | `origin_balance_before/after`, `destination_balance_before/after`, `origin_balance_delta`, `destination_balance_delta` |
+| Errors | `origin_balance_error`, `destination_balance_error` (NULL where not evaluable, filled with 0 and marked by the evidence flags) |
+| Ratios | `amount_to_origin_balance_ratio`, `amount_to_destination_balance_ratio` (NULL when the balance is 0, no division by zero; filled with -1, capped at 1e6) |
+| Time | `hour_of_day`, `day_of_week` (raw `step` and `day` are excluded: they are the time index) |
+| Flags | `is_flagged_fraud`, `origin_fully_drained`, `origin_balance_zero_before`, `destination_balance_zero_before`, `origin_/destination_balance_evidence`, `origin_/destination_balance_inconsistent`, `destination_is_merchant` |
+| Type | one-hot for the five types |
+
+Guards: no infinity or NaN can reach a model (checked on every matrix). 17 of the 28 are `pre_txn`: known before the transaction completes (no closing balances).
+
+## 8. Machine-learning methodology
+
+- **Temporal split on `step`** (train up to 70 % of the range, validation up to 85 %, test after): a random split would train on hours that come after the hours tested. Full data: train up to step 520, validation to 631, test 632 to 743.
+- **Training only**: non-fraud rows are deterministically undersampled (20 per fraud row; 121,737 rows used, 5,781 fraud). **Validation and test keep every row**, so all reported metrics are on the true class balance (test 89,466 rows, 1,252 fraud, 1.4 % because late steps contain little legitimate traffic).
+- Models: logistic regression (signed-log scaling, class weights) and random forest (200 trees). The threshold is chosen on validation (maximum F1) and applied unchanged to test. Reported: precision, recall, F1, PR-AUC, ROC-AUC, confusion matrix, feature importance.
+- **Two feature sets**: all 28 features, and the 17 `pre_txn` features, so an artifact in the closing balances cannot be mistaken for skill.
+
+**Leakage protection** (`features.py`, enforced before every fit and by tests):
+1. the label and anything derived from it (`is_fraud`, `flag_outcome`, any name with "fraud" except the rule flag, "outcome", "label", "target") can never be a feature; account-level aggregates of the label are excluded by the same rule;
+2. every model input must be in the registry, and every column of `gold.fact_transactions` must have a declared role, so a new column cannot become a feature unnoticed;
+3. a feature identical to the label on the data is rejected (when both classes are present);
+4. identifiers and the time index are not features;
+5. a univariate audit (`gold.model_feature_audit`) flags any single feature with ROC-AUC >= 0.99.
+**[measured]** the guard passes for all 28 features, no feature SQL references the label, and the audit flagged nothing (the strongest single feature is `origin_balance_delta`, ROC-AUC 0.965).
+
+**[measured] test set, full dataset** (89,466 rows, 1,252 fraud)
+
+| Model | Precision | Recall | F1 | PR-AUC | ROC-AUC | TP | FP | FN |
+|---|---|---|---|---|---|---|---|---|
+| random forest, all features | 0.9992 | 0.9992 | 0.9992 | 1.0000 | 1.0000 | 1,251 | 1 | 1 |
+| logistic regression, all features | 0.9952 | 0.9976 | 0.9964 | 1.0000 | 1.0000 | 1,249 | 6 | 3 |
+| random forest, pre-transaction only | 0.9992 | 0.9960 | 0.9976 | 1.0000 | 1.0000 | 1,247 | 1 | 5 |
+| logistic regression, pre-transaction only | 0.8549 | 0.5128 | 0.6410 | 0.7246 | 0.9906 | 642 | 109 | 610 |
+| existing rule `isFlaggedFraud` | 1.0000 | 0.0056 | 0.0111 | n/a | n/a | 7 | 0 | 1,245 |
+
+**Read this honestly.** The near-perfect scores mostly reflect the artifact above (fraud empties the origin account exactly; legitimate traffic never does), which a forest finds even from pre-transaction inputs such as `amount / origin balance = 1`. The linear model, which cannot express that equality, drops to F1 0.64. These numbers show the pipeline is correct and leakage-free by construction; they are not evidence of real-world fraud-detection performance. Development-sample results (2,053 fraud rows, 3,771 test rows, 341 fraud) are in `gold.model_metrics` for `dev`: the same picture, with logistic regression pre-transaction F1 0.726.
+
+## 9. Dashboard
+
+`streamlit run dashboard/app.py` now has two groups; the PayReconcile pages are unchanged. **PaySim analytics** (a dataset selector in the sidebar chooses `full` or a sample; sample datasets carry a warning that fraud is over-represented):
+
+1. **PaySim Overview**: total transactions, total value, fraud transactions, fraud amount, fraud rate, flagged fraud, data-quality failures, volume and value by type.
+2. **Transaction Analysis**: volume and amount by type, daily or hourly trend, largest senders and receivers.
+3. **Fraud Analysis**: fraud count, rate and amount by type; fraud per day and by hour of day; amount distribution (share per order-of-magnitude band, so classes with very different counts are comparable); the existing flag versus the label; accounts involved in fraud. The daily-rate chart is captioned because it approaches 100 % when few legitimate transactions remain.
+4. **Balance Integrity**: consistent / inconsistent / insufficient evidence, by type and by side, error totals and the 50 largest discrepancies.
+5. **Account Investigation**: filter by origin, destination, type, fraud status and step; per-account history with counterparty, balances and a balance chart; CSV download.
+6. **PaySim Data Quality**: every rule with checked, failed, failure rate, severity, and the quarantine.
+7. **Model Evaluation**: test metrics for every model and the existing rule, confusion matrix, precision-recall curve, feature importance, the leakage audit.
+
+Every page runs SQL from `paysim/queries.py` against Gold and Silver only; the benchmark times exactly those queries. All seven pages render in automated tests on a real pipeline run and the account filters are tested through the UI; the Fraud and Model pages were also opened in a browser against the full dataset (the other five were not opened by hand).
+
+## 10. Power BI export
+
+`paysim export` (part of `paysim run`) writes every Gold table plus `dq_results` and `dq_quarantine` to `exports/paysim/<dataset>/` as **Parquet and CSV** with `manifest.json` (rows, columns, files). CSV is written only up to 1,000,000 rows per table, so `fact_transactions` (6,362,620 rows, 431 MB Parquet) is Parquet only, which Power BI reads natively; the manifest says so. **No `.pbix` exists and nothing was opened in Power BI Desktop: the files are Power BI-ready, not verified inside Power BI.**
+
+## 11. Performance benchmarks
+
+**[measured]** Windows 11 laptop, 7.7 GB RAM, 12 logical cores, DuckDB 1.5.5, memory limit 3 GB, other applications open. Peak RSS is sampled every 50 ms (a lower bound) for the whole process. Stage times are single runs from `run_metrics.json`.
+
+| Stage | 250,000 rows (dev) | 1,000,000 rows | 6,362,620 rows (full) | Peak RSS at full |
+|---|---|---|---|---|
+| profile (several full scans) | 0.2 s | 0.7 s | 36.9 s | 1,023 MB |
+| Bronze: source to Parquet | 0.2 s | 1.0 s | 23.8 s | 503 MB |
+| Quality + Silver (DQ, duplicates, balance consistency) | 1.4 s | 3.7 s | 30.4 s | 1,970 MB |
+| Gold (8 tables) | 2.1 s | 5.0 s | 44.5 s | 2,638 MB |
+| ML (2 feature sets x 2 models) | 10.2 s | 11.7 s | 46.8 s | 733 MB |
+| Export (Parquet and CSV) | 2.4 s | 4.9 s | 12.7 s | 1,403 MB |
+| **Total** | **16.5 s** | **27.0 s** | **195.1 s** | |
+
+Sizes at full scale: CSV 493.5 MB, Bronze Parquet 192.4 MB (2.6x smaller), DuckDB file 1.64 GB (Silver + Gold + models).
+
+**CSV versus Parquet versus DuckDB table**, the same four aggregate queries, median of 3 runs, each form in a fresh process (full dataset):
+
+| Query | CSV | Parquet (Bronze) | DuckDB table |
+|---|---|---|---|
+| volume by type | 0.837 s | 0.051 s | 0.018 s |
+| fraud by type | 0.776 s | 0.049 s | 0.018 s |
+| top 20 senders (6.35 M groups) | 0.959 s | 0.444 s | 0.335 s |
+| range filter (step and type) | 0.688 s | 0.014 s | 0.003 s |
+| peak RSS of the worker process | 621 MB | 539 MB | 571 MB |
+
+On the 250 k sample the CSV queries take 0.09 to 0.11 s against 0.003 to 0.02 s for Parquet. The CSV form is the DuckDB CSV reader, so it already benefits from DuckDB; a **pandas baseline** (`read_csv` on the full file, then one group-by) takes **9.5 s and 1.8 GB** before any analysis, against 0.8 to 1.0 s for DuckDB's CSV reader on the same aggregates (whole worker process 0.6 GB, including the Python interpreter). The 16 dashboard queries at full scale sum to **0.36 s** (slowest: the account-history lookup, 0.115 s). The first CSV run also warms the OS file cache; the table reports the median.
+
+Scaling: rows x25 (250 k to 6.36 M) cost time x12, and no code changed between sizes.
+
+## 12. How to run
+
+```powershell
+python -m payreconcile paysim profile --dataset full          # profile the source
+python -m payreconcile paysim sample                          # development sample (250,000 rows, seed 42)
+python -m payreconcile paysim run --dataset dev               # profile -> Bronze -> quality/Silver -> Gold -> ML -> export
+python -m payreconcile paysim run --dataset full              # the same on the whole file (about 3 minutes)
+python -m payreconcile paysim sample --rows 1000000           # optional scaling step
+python -m payreconcile paysim run --dataset sample_1000000
+python -m payreconcile paysim benchmark --dataset full --pandas    # query benchmark (loads the CSV into pandas once)
+streamlit run dashboard/app.py                                # PaySim analytics group, sidebar dataset selector
+```
+
+Individual stages: `paysim bronze | quality | gold | ml | export --dataset <name>`. The source path is `paysim.source_file` in `config/settings.yml` (relative to the repository root) or the `PAYSIM_SOURCE` environment variable. Everything under `data/` and `exports/` and the source CSV itself are git-ignored.
+
+The development sample keeps every source row's `source_row_number`, so any sampled row traces to its line in the file. **[design]** It is stratified by (type, fraud) and ranked by `hash(source_row_number, seed)`; fraud strata keep 25 % of their rows, the rest is spread proportionally over non-fraud strata, giving exactly 250,000 rows. **[measured]** 2,053 fraud rows (0.82 %, 6.4x the source rate), 5 flagged; CASH_OUT 88,175, PAYMENT 83,951, CASH_IN 54,599, TRANSFER 21,658, DEBIT 1,617. It is for development and tests only: rates measured on it are not population rates. Re-running `sample` reproduced the same SHA-256.
+
+## 13. Testing
+
+**[measured]** 41 PaySim tests (31 pipeline, 10 dashboard); the whole suite is 238 tests. Hand-built files with hand-computed expectations plus a small deterministic synthetic file: schema validation (missing and extra columns), Bronze fidelity and immutability of the source, every DQ rule with exact counts, quarantine with reasons and row conservation, duplicate detection (later copy only, near-duplicate not flagged), the balance equation per transaction type, tolerance boundary, merchants and unrecorded balances, zero amounts and zero balances, fraud metrics on known numbers, feature edge cases (division by zero, NULLs, infinities), Gold tables agreeing with each other, sampling (exact size, stratification, provenance, same bytes for the same seed), the temporal split (strictly ordered, no overlap), model determinism, target leakage (see below), export, profile, and the pipeline's stage metrics and idempotence. Eleven deliberate breaks of the rules were tried by hand (reversed CASH_IN direction, unrecorded balances called consistent, merchant destinations evaluated, wrong duplicate copy, error rows kept, tolerance ignored, label allowed as a feature, future rows in training, swapped confusion cells, unguarded division, disabled leakage name rule). Ten were caught. The eleventh survived, because a second guard layer (the feature registry) still raised, so a test for the name rule alone was added afterwards; that final break was not re-run.
+
+## 14. Validation performed
+
+**[measured]** on the final code: Gold equals the source row by row on both datasets (`EXCEPT ALL` in both directions returns 0 rows for 250,000 and for 6,362,620 rows) and per-type row count, amount, fraud and flag sums are identical; bronze = silver + quarantined on every run; the development sample, the Gold table hash and the model metrics are identical when rebuilt; the leakage guard passes and the audit flags nothing. `ruff` is clean and the secrets scan finds nothing.
+
+## 15. Limitations and future improvements
+
+**[limit]**
+- The PaySim data is simulated. Its fraud pattern is an artifact (fraud empties the origin exactly), so model scores here do not predict real-world performance.
+- Balances are observed after the transaction; a real-time authoriser would not have them. The `pre_txn` set removes closing balances but still contains the exact-drain signal through `amount / balance`.
+- The balance rules are inferred from this data. 37 % of rows are consistent because the simulator writes balances loosely, and 33 % of origins have no recorded balances; neither says anything about real accounts.
+- No transaction id exists, so duplicates cannot be told from repeated real transactions; they are flagged only.
+- The test window holds 89,466 rows (1.4 % fraud) because late steps have little legitimate traffic; metrics on such a small, fraud-dense window are noisy, and the development-sample test window is smaller still.
+- Random-forest probabilities can differ in the last digits between runs (parallel tree averaging); counts are identical.
+- The full pipeline needs about 3 GB of memory; the DuckDB file is 1.6 GB; benchmarks ran once on one machine with other applications open.
+- `account_activity` covers accounts with at least two transactions or any fraud involvement (480,130 of about 8.9 million accounts).
+- Power BI export files were not opened in Power BI.
+
+**Future improvements** (not built): a sequence model on per-account history (fraud here is a TRANSFER followed by a CASH_OUT), time-based cross-validation, threshold tuning on a cost matrix, an incremental Silver load keyed on `source_row_number`, and a small dbt project for the Gold tables if they should share tooling with PayReconcile.

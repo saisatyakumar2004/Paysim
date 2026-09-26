@@ -71,12 +71,17 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("anomalies", help="train + score the merchant-day anomaly model on trusted data")
     sub.add_parser("reset", help="delete the warehouse and bronze layers (keeps source data)")
 
+    from .paysim import cli as paysim_cli
+    paysim_cli.register(sub)
+
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     logging.getLogger("payreconcile").setLevel(logging.WARNING)
     logging.getLogger("httpx").setLevel(logging.WARNING)
 
-    if args.cmd == "generate":
+    if args.cmd == "paysim":
+        paysim_cli.dispatch(args)
+    elif args.cmd == "generate":
         from .generate import GenConfig, generate
         s = generate(GenConfig(days=args.days, orders_per_day=args.orders_per_day, n_merchants=args.merchants,
                                seed=args.seed, bad_rate=args.bad_rate, financial_defects=args.financial_defects,
