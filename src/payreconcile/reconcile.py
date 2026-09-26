@@ -357,17 +357,23 @@ def _build_items(con, AS_OF: str, sla: int, tol: float, dup_min: int) -> None:
         GROUP BY t.txn_id""")
     con.execute(f"""
         CREATE OR REPLACE TEMP TABLE new_items AS
-        WITH txn_items AS (
+        WITH linked AS (
+            -- One row per txn even when the bank references it more than once (split or duplicate settlement): the
+            -- settled amount is the sum, so a double payment shows as a mismatch instead of a duplicated item.
+            SELECT k.txn_id, min(k.settlement_id) AS settlement_id, min(k.match_method) AS match_method,
+                   sum(s.gross_amount) AS gross_amount
+            FROM links_new k JOIN silver.settlements s ON s.settlement_id = k.settlement_id GROUP BY k.txn_id),
+        txn_items AS (
             SELECT 'TXN:' || t.txn_id AS item_id, 'txn' AS item_type, t.txn_id, l.settlement_id, t.order_id,
                    t.merchant_id, t.txn_date AS event_date, t.expected_gross AS expected_amount,
-                   s.gross_amount AS settled_amount, s.gross_amount - t.expected_gross AS diff_amount,
+                   l.gross_amount AS settled_amount, l.gross_amount - t.expected_gross AS diff_amount,
                    CASE
                      WHEN t.txn_type = 'refund'
                           AND t.refund_of NOT IN (SELECT txn_id FROM silver.gateway_txns)
                           AND t.refund_of NOT IN {quarantined} THEN 'ORPHAN_REFUND'
                      WHEN l.settlement_id IS NULL THEN
                           CASE WHEN t.txn_date + {sla} < {AS_OF} THEN 'MISSING_SETTLEMENT' ELSE 'PENDING' END
-                     WHEN abs(s.gross_amount - t.expected_gross) <= {tol} THEN 'MATCHED'
+                     WHEN abs(l.gross_amount - t.expected_gross) <= {tol} THEN 'MATCHED'
                      ELSE 'AMOUNT_MISMATCH' END AS status,
                    l.match_method,
                    d.txn_id IS NOT NULL AS is_duplicate_charge,
@@ -383,8 +389,7 @@ def _build_items(con, AS_OF: str, sla: int, tol: float, dup_min: int) -> None:
                         WHEN qd.txn_id IS NOT NULL THEN 'QUARANTINED_ORIGINAL' END AS duplicate_basis,
                    CASE WHEN d.txn_id IS NULL AND qd.txn_id IS NOT NULL THEN t.amount ELSE 0 END AS suspected_duplicate_exposure
             FROM t_scope t
-            LEFT JOIN links_new l ON l.txn_id = t.txn_id
-            LEFT JOIN silver.settlements s ON s.settlement_id = l.settlement_id
+            LEFT JOIN linked l ON l.txn_id = t.txn_id
             LEFT JOIN dup d ON d.txn_id = t.txn_id
             LEFT JOIN qdup qd ON qd.txn_id = t.txn_id
             LEFT JOIN silver.orders o ON o.order_id = t.order_id),

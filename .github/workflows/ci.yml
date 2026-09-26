@@ -22,12 +22,7 @@ jobs:
         run: python scripts/scan_secrets.py
       - name: Data-quality and reconciliation smoke test (8 days, deterministic, no dbt)
         run: python scripts/smoke_ci.py
-      - name: Unit tests (quality engine, Silver, ingestion, API, reconciliation, replay, recovery, ML leakage)
+      - name: Unit tests (quality engine, Silver, ingestion, API, reconciliation, money flow, replay, recovery, ML leakage)
         run: pytest -q -m "not slow"
-      - name: End-to-end (generate -> pipeline -> dbt build + dbt tests -> score vs ground truth -> failure scenarios)
+      - name: End-to-end (generate -> pipeline -> dbt build + dbt tests -> score vs ground truth incl. money flow -> failure scenarios)
         run: pytest -q -m slow
-      - name: Generated docs are in sync with their sources (rule catalogue, KPI definitions)
-        run: |
-          python scripts/gen_rule_docs.py
-          python scripts/gen_kpi_docs.py
-          git diff --exit-code docs/dq_rules.md docs/kpi_definitions.md

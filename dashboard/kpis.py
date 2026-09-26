@@ -1,7 +1,7 @@
 """KPI registry: the single source of truth for every metric shown in the dashboard, the docs and the Power BI export.
 
 Every KPI has a definition, a formula, the business meaning and the tables it is computed from. The dashboard uses these as
-tooltips; `scripts/gen_kpi_docs.py` renders docs/kpi_definitions.md from them.
+tooltips.
 """
 
 from __future__ import annotations

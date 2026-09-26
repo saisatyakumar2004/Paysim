@@ -28,6 +28,14 @@ qdup as (
       and ({{ qts }} is null or abs(epoch({{ qts }} - t.created_at)) > 86400 or abs(epoch({{ qts }} - t.created_at)) <= {{ win }})
     group by t.txn_id
 ),
+linked as (
+    -- one row per txn even when the bank references it more than once (split or duplicate settlement)
+    select k.txn_id, min(k.settlement_id) as settlement_id, min(k.match_method) as match_method,
+           sum(s.gross_amount) as gross_amount
+    from {{ ref('int_txn_settlement_links') }} k
+    join {{ source('silver', 'settlements') }} s on s.settlement_id = k.settlement_id
+    group by k.txn_id
+),
 txn_items as (
     select
         'TXN:' || t.txn_id as item_id,
@@ -38,8 +46,8 @@ txn_items as (
         t.merchant_id,
         t.txn_date as event_date,
         t.expected_gross as expected_amount,
-        s.gross_amount as settled_amount,
-        s.gross_amount - t.expected_gross as diff_amount,
+        l.gross_amount as settled_amount,
+        l.gross_amount - t.expected_gross as diff_amount,
         case
             when t.txn_type = 'refund'
                  and t.refund_of not in (select txn_id from {{ source('silver', 'gateway_txns') }})
@@ -47,7 +55,7 @@ txn_items as (
                 then 'ORPHAN_REFUND'
             when l.settlement_id is null then
                 case when t.txn_date + {{ var('sla_days') }} < {{ as_of }} then 'MISSING_SETTLEMENT' else 'PENDING' end
-            when abs(s.gross_amount - t.expected_gross) <= {{ var('amount_tolerance') }} then 'MATCHED'
+            when abs(l.gross_amount - t.expected_gross) <= {{ var('amount_tolerance') }} then 'MATCHED'
             else 'AMOUNT_MISMATCH'
         end as status,
         l.match_method,
@@ -67,8 +75,7 @@ txn_items as (
              when qd.txn_id is not null then 'QUARANTINED_ORIGINAL' end as duplicate_basis,
         case when d.txn_id is null and qd.txn_id is not null then t.amount else 0 end as suspected_duplicate_exposure
     from {{ ref('int_txns_captured') }} t
-    left join {{ ref('int_txn_settlement_links') }} l on l.txn_id = t.txn_id
-    left join {{ source('silver', 'settlements') }} s on s.settlement_id = l.settlement_id
+    left join linked l on l.txn_id = t.txn_id
     left join {{ ref('int_duplicate_charges') }} d on d.txn_id = t.txn_id
     left join qdup qd on qd.txn_id = t.txn_id
     left join {{ source('silver', 'orders') }} o on o.order_id = t.order_id

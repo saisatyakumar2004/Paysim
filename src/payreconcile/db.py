@@ -103,6 +103,23 @@ CREATE TABLE IF NOT EXISTS ops.replay_log (
     replay_id VARCHAR, run_date DATE, dataset VARCHAR, natural_key VARCHAR, outcome VARCHAR,
     old_rule_ids VARCHAR, new_rule_ids VARCHAR, replayed_at TIMESTAMP);
 
+-- Money-flow lineage (owned by payreconcile.moneyflow; rebuilt from Silver + the reconciliation state on every run).
+-- One row per money chain: order -> gateway -> fee -> expected settlement -> bank -> merchant, with signed gaps per step.
+CREATE TABLE IF NOT EXISTS gold.fact_money_flow (
+    flow_id VARCHAR, flow_type VARCHAR, order_id VARCHAR, txn_id VARCHAR, merchant_id VARCHAR,
+    settlement_ids VARCHAR, bank_reference VARCHAR, match_method VARCHAR, recon_status VARCHAR,
+    event_date DATE, settlement_date DATE, settlement_lag_days INTEGER, n_settlements INTEGER, settlement_pattern VARCHAR,
+    order_state VARCHAR,
+    order_amount DOUBLE, expected_gateway DOUBLE, gateway_gross DOUBLE, fee_pct DOUBLE, expected_fee DOUBLE, expected_net DOUBLE,
+    bank_gross DOUBLE, bank_fee DOUBLE, bank_net DOUBLE, merchant_amount DOUBLE, merchant_stage VARCHAR,
+    gap_gateway DOUBLE, gap_bank_amount DOUBLE, gap_fee DOUBLE, gap_bank_net DOUBLE, difference_amount DOUBLE,
+    classification VARCHAR, first_breakpoint VARCHAR, root_cause VARCHAR, resolution VARCHAR, evidence_level VARCHAR,
+    findings VARCHAR, exposure_amount DOUBLE, tolerated_amount DOUBLE, counted_in VARCHAR, evidence_summary VARCHAR,
+    as_of_date DATE, run_id VARCHAR);
+-- The underlying records behind every non-reconciled conclusion (order, gateway txn, bank rows, quarantine rows, candidates).
+CREATE TABLE IF NOT EXISTS gold.money_flow_evidence (
+    flow_id VARCHAR, evidence_type VARCHAR, record_ref VARCHAR, detail VARCHAR, amount DOUBLE);
+
 CREATE TABLE IF NOT EXISTS ops.watermarks (dataset VARCHAR PRIMARY KEY, watermark TIMESTAMP);
 """
 

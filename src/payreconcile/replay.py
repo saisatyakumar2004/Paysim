@@ -21,7 +21,7 @@ from datetime import date, datetime
 
 import pandas as pd
 
-from . import db, dq, ingest, quarantine, reconcile, silver, transform
+from . import db, dq, ingest, moneyflow, quarantine, reconcile, silver, transform
 
 APPLY = {"gateway": silver.apply_gateway, "orders": silver.apply_orders, "settlements": silver.apply_settlements}
 SILVER_TABLE = {"gateway": "silver.gateway_txns", "orders": "silver.orders", "settlements": "silver.settlements"}
@@ -101,6 +101,7 @@ def replay(dataset: str, run_date: date, run_dbt: bool = True) -> dict:
         if out["released"] or out["superseded"]:
             st = reconcile.reconcile(con, as_of, replay_id, run_date)          # scope comes from the change log
             out["reconciliation"] = {"mode": st.mode, "items_evaluated": st.items_evaluated, "items_changed": st.items_changed}
+        moneyflow.build(con, replay_id)                                        # quarantine changes are evidence too
     finally:
         con.close()
     if run_dbt and out["released"]:

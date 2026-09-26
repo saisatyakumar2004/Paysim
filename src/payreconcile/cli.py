@@ -24,6 +24,8 @@ def main(argv: list[str] | None = None) -> int:
     g.add_argument("--merchants", type=int, default=200)
     g.add_argument("--seed", type=int, default=42)
     g.add_argument("--bad-rate", type=float, default=1.0)
+    g.add_argument("--financial-defects", type=float, default=1.0,
+                   help="multiplier on the fee / late / duplicate / split / aggregated settlement scenarios (0 = off)")
     g.add_argument("--start", type=_d, default=date(2026, 1, 1))
 
     r = sub.add_parser("run", help="run the pipeline for one day")
@@ -54,6 +56,10 @@ def main(argv: list[str] | None = None) -> int:
     vr = sub.add_parser("verify-recon", help="check incremental state against a from-scratch rebuild")
     vr.add_argument("--reference", action="store_true", help="also compare with the independent dbt reference model")
 
+    mf = sub.add_parser("money-flow", help="where did the money go missing? headline, waterfall and per-chain investigation")
+    mf.add_argument("--rebuild", action="store_true", help="rebuild gold.fact_money_flow first")
+    mf.add_argument("--flow", default=None, help="investigate one chain, e.g. TXN:TXN1234567890")
+
     ex = sub.add_parser("explain", help="explain a reconciliation item: evidence, audit history, source records")
     ex.add_argument("item_id", help="e.g. TXN:TXN1234567890, STL:STL000000012, ORD:ORD00000012")
 
@@ -73,7 +79,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "generate":
         from .generate import GenConfig, generate
         s = generate(GenConfig(days=args.days, orders_per_day=args.orders_per_day, n_merchants=args.merchants,
-                               seed=args.seed, bad_rate=args.bad_rate, start=args.start))
+                               seed=args.seed, bad_rate=args.bad_rate, financial_defects=args.financial_defects,
+                               start=args.start))
         print(json.dumps(s, indent=2, default=str))
     elif args.cmd == "run":
         from .pipeline import run_day
@@ -104,6 +111,25 @@ def main(argv: list[str] | None = None) -> int:
         as_of = con.execute("SELECT coalesce(max(as_of_date), max(run_date)) FROM (SELECT as_of_date, NULL AS run_date "
                             "FROM ops.recon_state UNION ALL SELECT NULL, max(run_date) FROM ops.run_log)").fetchone()[0]
         print(json.dumps(reconcile.reconcile(con, as_of, "cli", full=args.full).__dict__, indent=2, default=str))
+        from . import moneyflow
+        print(json.dumps(moneyflow.build(con, "cli"), default=str))
+        con.close()
+    elif args.cmd == "money-flow":
+        from . import db, moneyflow
+        con = db.connect() if args.rebuild else db.connect(read_only=True)
+        if args.rebuild:
+            print(json.dumps(moneyflow.build(con, "cli"), default=str))
+        if args.flow:
+            inv = moneyflow.investigate(con, args.flow)
+            print("no such chain" if inv is None else json.dumps(
+                {"flow": inv["flow"], "stages": inv["stages"], "evidence": inv["evidence"].to_dict("records")}, indent=2,
+                default=str))
+        else:
+            s = moneyflow.summary(con)
+            print(moneyflow.headline(con))
+            print(json.dumps({"waterfall": s["waterfall"], "earliest_open_breakpoint": s["earliest_open_breakpoint"],
+                              "by_stage": s["by_stage"].to_dict("records"), "invariants": moneyflow.check_invariants(con)},
+                             indent=2, default=str))
         con.close()
     elif args.cmd == "verify-recon":
         from . import db, reconcile, transform
@@ -127,10 +153,14 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"out": args.out, "as_of_date": m["as_of_date"],
                           "tables": {k: v["rows"] for k, v in m["tables"].items()}}, indent=2))
     elif args.cmd == "explain":
-        from . import db
+        from . import db, moneyflow
         from .explain import explain
         con = db.connect(read_only=True)
-        print(json.dumps(explain(con, args.item_id), indent=2, default=str))
+        out = explain(con, args.item_id)
+        inv = moneyflow.investigate(con, args.item_id)          # item ids and chain ids share one namespace (TXN:/STL:/ORD:)
+        if inv is not None:
+            out["money_flow"] = {"flow": inv["flow"], "stages": inv["stages"], "evidence": inv["evidence"].to_dict("records")}
+        print(json.dumps(out, indent=2, default=str))
         con.close()
     elif args.cmd == "evaluate":
         from .evaluate import evaluate_all, print_report

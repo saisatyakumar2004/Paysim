@@ -310,3 +310,25 @@ def test_forced_full_recompute_repairs_a_corrupted_state_and_audits_the_repair(c
     s = recon(con, "2026-01-02", full=True)
     assert s.mode == "full" and item(con, "TXN:T1")["status"] == "MATCHED" and reconcile.verify(con)["ok"]
     assert audit(con, "TXN:T1")[-1][2:] == ("MISSING_SETTLEMENT", "MATCHED")
+
+
+# ---- one txn referenced by several bank records ---------------------------------------------------------------------
+def test_a_txn_paid_twice_by_the_bank_is_one_item_and_a_mismatch_not_a_hidden_match(con):
+    load(con, txns=[gw("T1")], orders=[order("O1")],
+         stls=[stl("S1", "GW-T1", on="2026-01-02"), stl("S2", "GW-T1", on="2026-01-03")])
+    recon(con, "2026-01-05")
+    rows = con.execute("SELECT status, settled_amount, diff_amount FROM gold.fact_reconciliation "
+                       "WHERE item_id = 'TXN:T1'").fetchall()
+    assert rows == [("AMOUNT_MISMATCH", 200.0, 100.0)]          # was: four identical MATCHED rows
+    assert con.execute("SELECT count(*) - count(DISTINCT item_id) FROM gold.fact_reconciliation").fetchone()[0] == 0
+    assert reconcile.verify(con)["ok"]
+
+
+def test_a_settlement_split_over_two_bank_records_matches_once_when_the_parts_add_up(con):
+    load(con, txns=[gw("T1")], orders=[order("O1")],
+         stls=[stl("S1", "GW-T1", amount="60", on="2026-01-02"), stl("S2", "GW-T1", amount="40", on="2026-01-02")])
+    recon(con, "2026-01-05")
+    rows = con.execute("SELECT status, settled_amount FROM gold.fact_reconciliation WHERE item_id = 'TXN:T1'").fetchall()
+    assert rows == [("MATCHED", 100.0)]
+    assert con.execute("SELECT count(*) FROM gold.fact_reconciliation WHERE item_type = 'settlement'").fetchone()[0] == 0
+    assert reconcile.verify(con)["ok"]

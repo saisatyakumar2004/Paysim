@@ -16,7 +16,7 @@ from datetime import date, datetime, timedelta
 
 import pandas as pd
 
-from . import db, dq, ingest, quarantine, reconcile, resources, silver, transform
+from . import db, dq, ingest, moneyflow, quarantine, reconcile, resources, silver, transform
 
 log = logging.getLogger("payreconcile.pipeline")
 
@@ -165,6 +165,8 @@ def run_day(run_date: date, run_dbt: bool = True, gateway_client: ingest.Gateway
         if gate == "HALT":
             summary.status = "QUALITY_GATE_FAILED"
             log.error("quality gate HALT for %s: %s", run_date, reasons)
+            with tasks.task("money_flow") as rec:      # a halted batch is evidence: chains that depend on it are BLOCKED
+                rec["rows_out"] = moneyflow.build(con, run_id).get("flows", 0)
         else:
             with tasks.task("load_silver") as rec:
                 written = 0
@@ -189,6 +191,10 @@ def run_day(run_date: date, run_dbt: bool = True, gateway_client: ingest.Gateway
                 rec["detail"] = (f"mode={rs.mode} changes={rs.changes_read} scope(txn/stl/ord)="
                                  f"{rs.scope_txns}/{rs.scope_settlements}/{rs.scope_orders} "
                                  f"evaluated={rs.items_evaluated}/{rs.items_total} changed={rs.items_changed}")
+            with tasks.task("money_flow") as rec:
+                mf = moneyflow.build(con, run_id)
+                rec["rows_out"] = mf["flows"]
+                rec["detail"] = f"chains={mf['flows']} evidence_rows={mf.get('evidence_rows', 0)}"
 
             # ---- gold marts + tests (dbt) -----------------------------------------------------------------------
             if run_dbt:

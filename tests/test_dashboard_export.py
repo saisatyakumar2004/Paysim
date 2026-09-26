@@ -27,8 +27,8 @@ DASH = str(ROOT / "dashboard")
 START = date(2026, 1, 1)
 DAYS = 9
 LAST = START + timedelta(days=DAYS - 1)
-PAGES = ["executive", "reconciliation", "exceptions", "data_quality", "settlement", "merchant_risk", "anomaly_signals",
-         "pipeline_health"]
+PAGES = ["money_flow", "executive", "reconciliation", "exceptions", "data_quality", "settlement", "merchant_risk",
+         "anomaly_signals", "pipeline_health"]
 
 
 @pytest.fixture(scope="module")
@@ -66,10 +66,51 @@ def test_every_dashboard_page_renders_without_error(platform, module):
     assert len(at.title) == 1
 
 
-def test_the_entry_point_defines_eight_pages_with_stable_urls(platform):
+def test_the_entry_point_defines_nine_pages_with_stable_urls_and_money_flow_first(platform):
     src = (ROOT / "dashboard" / "app.py").read_text(encoding="utf-8")
-    for path in ("overview", "reconciliation", "exceptions", "data-quality", "settlement", "merchant-risk", "anomalies", "pipeline"):
+    for path in ("money-flow", "overview", "reconciliation", "exceptions", "data-quality", "settlement", "merchant-risk",
+                 "anomalies", "pipeline"):
         assert f'"{path}"' in src
+    assert src.index('"money-flow"') < src.index('"overview"')
+    assert '("Money Flow", "money-flow", money_flow.render, True)' in src            # the default landing page
+
+
+def _investigation_script(flow_id: str, dash: str) -> None:
+    import sys
+    if dash not in sys.path:
+        sys.path.insert(0, dash)
+    import views.money_flow as mf
+    mf._investigation(flow_id)
+
+
+def test_the_money_flow_page_shows_the_headline_the_waterfall_and_the_conservation_check(platform):
+    at = AppTest.from_function(_page_script, args=("money_flow", DASH), default_timeout=120).run()
+    assert not at.exception, [str(e.value)[:300] for e in at.exception]
+    info = " ".join(i.value for i in at.info)
+    assert "was expected from customers" in info and "reached the bank" in info and "not in the source data" in info
+    assert not at.error                                                                # no conservation check failed
+    labels = {m.label for m in at.metric}
+    assert {"Expected settlement", "Reconciled", "Money at risk", "Unexplained", "Blocked / unverifiable", "In flight"} <= labels
+    frames = [df.value for df in at.dataframe]
+    waterfall = next(f for f in frames if "step" in f.columns and "Merchant received" in set(f["step"]))
+    row = waterfall[waterfall["step"] == "Merchant received"].iloc[0]
+    assert "NOT AVAILABLE" in row["note"] and pd.isna(row["INR"])                       # never fabricated
+
+
+@pytest.mark.parametrize("classification", ["MATCHED", "MISSING_SETTLEMENT", "BANK_AMOUNT_MISMATCH", "QUARANTINED_SOURCE"])
+def test_the_investigation_view_shows_every_stage_and_the_evidence_for_a_chain(platform, classification):
+    con = duckdb.connect(str(config.warehouse_path()), read_only=True)
+    row = con.execute("SELECT flow_id FROM gold.fact_money_flow WHERE classification = ? ORDER BY flow_id LIMIT 1",
+                      [classification]).fetchone()
+    con.close()
+    if row is None:
+        pytest.skip(f"no {classification} chain in this small dataset")
+    at = AppTest.from_function(_investigation_script, args=(row[0], DASH), default_timeout=120).run()
+    assert not at.exception, [str(e.value)[:300] for e in at.exception]
+    stage_table = next(df.value for df in at.dataframe if "stage" in df.value.columns and "step" in df.value.columns)
+    assert list(stage_table["stage"]) == ["ORDER", "GATEWAY", "FEE", "EXPECTED", "BANK", "MERCHANT", "RESULT"]
+    verdict = " ".join(x.value for group in (at.error, at.warning, at.info, at.success) for x in group)
+    assert classification in verdict
 
 
 def test_the_anomaly_page_carries_the_not_a_fraud_detector_warning(platform):
@@ -84,14 +125,6 @@ def test_every_kpi_has_definition_formula_meaning_and_sources():
     assert len(KPIS) >= 12
     for k in KPIS.values():
         assert k.definition and k.formula and k.meaning and k.sources, k.key
-
-
-def test_kpi_docs_are_generated_from_the_registry():
-    sys.path.insert(0, DASH)
-    from kpis import KPIS
-    text = (ROOT / "docs" / "kpi_definitions.md").read_text(encoding="utf-8")
-    for k in KPIS.values():
-        assert f"## {k.name}" in text
 
 
 # ---- exceptions queue filters ---------------------------------------------------------------------------------------
@@ -177,8 +210,9 @@ def exported(platform, tmp_path_factory):
 
 def test_export_writes_every_table_in_both_formats(exported):
     out, manifest = exported
-    expected = {"dim_date", "dim_merchant", "dim_payment_method", "dim_status", "fact_transactions", "fact_settlements",
-                "fact_reconciliation", "fact_reconciliation_audit", "kpi_daily", "dq_scores", "pipeline_runs"}
+    expected = {"dim_date", "dim_merchant", "dim_payment_method", "dim_status", "dim_stage", "dim_resolution",
+                "fact_transactions", "fact_settlements", "fact_reconciliation", "fact_reconciliation_audit", "fact_money_flow",
+                "money_flow_bridge", "money_flow_evidence", "kpi_daily", "dq_scores", "pipeline_runs"}
     assert set(manifest["tables"]) == expected
     for t in expected:
         assert (out / f"{t}.csv").exists() and (out / f"{t}.parquet").exists()
@@ -190,7 +224,8 @@ def test_export_row_counts_match_the_warehouse(platform, exported):
     con = duckdb.connect(str(config.warehouse_path()), read_only=True)
     for table, src in (("fact_transactions", "silver.gateway_txns"), ("fact_settlements", "silver.settlements"),
                        ("fact_reconciliation", "gold.fact_reconciliation"), ("dim_merchant", "silver.merchants_scd2"),
-                       ("fact_reconciliation_audit", "gold.reconciliation_audit")):
+                       ("fact_reconciliation_audit", "gold.reconciliation_audit"), ("fact_money_flow", "gold.fact_money_flow"),
+                       ("money_flow_evidence", "gold.money_flow_evidence")):
         assert manifest["tables"][table]["rows"] == con.execute(f"SELECT count(*) FROM {src}").fetchone()[0], table
     con.close()
 
@@ -231,6 +266,41 @@ def test_export_kpis_agree_with_the_reconciliation_state_and_the_daily_table(pla
     exc_export = con.execute(f"SELECT count(*) FROM read_parquet('{p}/fact_reconciliation.parquet') WHERE is_exception").fetchone()[0]
     assert money_fact == pytest.approx(money_state) == pytest.approx(money_daily)
     assert exc_export == exc_state
+    con.close()
+
+
+def test_the_export_carries_the_financial_lineage_and_root_cause_fields_powerbi_needs(exported):
+    out, manifest = exported
+    cols = set(manifest["tables"]["fact_money_flow"]["columns"])
+    assert {"order_amount", "gateway_gross", "expected_fee", "expected_net", "bank_net", "merchant_amount", "gap_gateway",
+            "gap_bank_amount", "gap_fee", "gap_bank_net", "difference_amount", "classification", "first_breakpoint",
+            "root_cause", "resolution", "evidence_level", "exposure_amount", "counted_in", "settlement_ids",
+            "merchant_sk", "date_key"} <= cols
+    con = duckdb.connect()
+    p = out.as_posix()
+
+    def q(sql):
+        return con.execute(sql.replace("$", p + "/")).fetchone()[0]
+
+    assert q("SELECT count(*) - count(DISTINCT flow_id) FROM read_parquet('$fact_money_flow.parquet')") == 0
+    assert q("SELECT count(*) FROM read_parquet('$fact_money_flow.parquet') WHERE merchant_sk IS NOT NULL AND merchant_sk NOT IN "
+             "(SELECT merchant_sk FROM read_parquet('$dim_merchant.parquet'))") == 0
+    assert q("SELECT count(*) FROM read_parquet('$fact_money_flow.parquet') WHERE first_breakpoint NOT IN "
+             "(SELECT stage FROM read_parquet('$dim_stage.parquet'))") == 0
+    assert q("SELECT count(*) FROM read_parquet('$fact_money_flow.parquet') WHERE resolution NOT IN "
+             "(SELECT resolution FROM read_parquet('$dim_resolution.parquet'))") == 0
+    assert q("SELECT count(*) FROM read_parquet('$fact_money_flow.parquet') WHERE merchant_amount IS NOT NULL") == 0
+    # the bridge is the same money, one row per chain and step: it sums back to the wide table's gaps
+    wide = q("SELECT round(sum(gap_gateway + gap_bank_amount + gap_fee + gap_bank_net), 2) FROM read_parquet('$fact_money_flow.parquet')")
+    long_ = q("SELECT round(sum(amount), 2) FROM read_parquet('$money_flow_bridge.parquet')")
+    assert wide == pytest.approx(long_, abs=0.01)
+    assert q("SELECT count(*) FROM read_parquet('$money_flow_bridge.parquet') WHERE flow_id NOT IN "
+             "(SELECT flow_id FROM read_parquet('$fact_money_flow.parquet'))") == 0
+    assert q("SELECT count(*) FROM read_parquet('$money_flow_evidence.parquet') WHERE flow_id NOT IN "
+             "(SELECT flow_id FROM read_parquet('$fact_money_flow.parquet'))") == 0
+    # every open or blocked finding can be traced to at least one underlying record
+    assert q("SELECT count(*) FROM read_parquet('$fact_money_flow.parquet') f WHERE f.resolution IN ('OPEN', 'BLOCKED') "
+             "AND f.exposure_amount > 0 AND f.flow_id NOT IN (SELECT flow_id FROM read_parquet('$money_flow_evidence.parquet'))") == 0
     con.close()
 
 

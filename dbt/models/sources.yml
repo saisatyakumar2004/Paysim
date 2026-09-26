@@ -43,11 +43,33 @@ sources:
           - name: money_at_risk
             data_tests: [not_null]
       - name: recon_links
+        description: A txn can link to several bank rows (split or duplicate settlement); a bank row links to one txn.
         columns:
           - name: txn_id
-            data_tests: [unique, not_null]
+            data_tests: [not_null]
           - name: settlement_id
             data_tests: [unique, not_null]
+      - name: fact_money_flow
+        description: One row per money chain (order -> gateway -> fee -> expected settlement -> bank), maintained by payreconcile.moneyflow.
+        columns:
+          - name: flow_id
+            data_tests: [unique, not_null]
+          - name: classification
+            data_tests: [not_null]
+          - name: first_breakpoint
+            data_tests:
+              - not_null
+              - accepted_values:
+                  arguments:
+                    values: [NONE, ORDER, GATEWAY, PROCESSING, BANK_SETTLEMENT, MERCHANT_SETTLEMENT, SOURCE_DATA_QUALITY, MATCHING]
+          - name: resolution
+            data_tests:
+              - not_null
+              - accepted_values:
+                  arguments:
+                    values: [RECONCILED, IN_FLIGHT, TIMING, EXPLAINED, BLOCKED, OPEN]
+          - name: exposure_amount
+            data_tests: [not_null]
       - name: reconciliation_audit
         columns:
           - name: audit_id

@@ -1,9 +1,10 @@
 """Scores the pipeline against the generator's ground truth (only possible because the data is synthetic).
 
-Three questions:
+Four questions:
   1. Did the data-quality layer catch the injected defects (and only those)?
   2. Did reconciliation assign the right status to every transaction?
   3. Were duplicate charges, fuzzy matches and order problems found?
+  4. Did the money-flow model find the right stage, cause and amount for every chain (see moneyflow.py / truth.py)?
 """
 
 from __future__ import annotations
@@ -129,8 +130,85 @@ def evaluate_all(db_path=None, truth_path=None) -> dict:
     report["money_at_risk_by_status"] = con.execute(
         "SELECT status, count(*) items, round(sum(money_at_risk), 2) money FROM gold.fact_reconciliation "
         "WHERE money_at_risk > 0 GROUP BY 1 ORDER BY 3 DESC").df().to_dict("records")
+
+    # 4. money flow: stage, cause and amount of every chain ---------------------------------------------------------
+    report["money_flow"] = evaluate_money_flow(con, tdir)
     con.close()
     return report
+
+
+MONEY_TOL = 0.011          # amounts are compared to the cent
+NOT_A_DISCREPANCY = ("MATCHED", "PENDING", "TIMING_DELAY", "DATE_ANOMALY")
+
+
+def evaluate_money_flow(con, tdir) -> dict | None:
+    """Score gold.fact_money_flow against truth/money_flow.parquet, chain by chain. Failures are reported, never dropped."""
+    path = tdir / "money_flow.parquet"
+    if not path.exists():
+        return None
+    truth = pd.read_parquet(path)
+    got = con.execute("SELECT * FROM gold.fact_money_flow").df()
+    m = truth.merge(got, on="flow_id", how="outer", suffixes=("_t", "_p"), indicator=True)
+    both = m[m["_merge"] == "both"].copy()
+    only_truth, only_pipeline = m[m["_merge"] == "left_only"], m[m["_merge"] == "right_only"]
+
+    cls_ok = both["expected_final_status"] == both["classification"]
+    bp_ok = both["expected_breakpoint"] == both["first_breakpoint"]
+    res_ok = both["expected_resolution"] == both["resolution"]
+    t_pos = ~both["expected_final_status"].isin(NOT_A_DISCREPANCY)
+    p_pos = ~both["classification"].isin(NOT_A_DISCREPANCY)
+    out: dict = {
+        "chains": {"truth": int(len(truth)), "pipeline": int(len(got)), "matched_ids": int(len(both)),
+                   "truth_only": int(len(only_truth)), "pipeline_only": int(len(only_pipeline))},
+        "classification_accuracy": round(float(cls_ok.mean()), 4) if len(both) else None,
+        "breakpoint_accuracy": round(float(bp_ok.mean()), 4) if len(both) else None,
+        "resolution_accuracy": round(float(res_ok.mean()), 4) if len(both) else None,
+        "discrepancy_detection": _pr(int((t_pos & p_pos).sum()), int((~t_pos & p_pos).sum()), int((t_pos & ~p_pos).sum())),
+        "root_cause": {"correct": int((t_pos & cls_ok & bp_ok).sum()), "incorrect": int((t_pos & ~(cls_ok & bp_ok)).sum()),
+                       "of_truth_discrepancies": int(t_pos.sum())},
+        "unexplained": {"classified_unexplained": int((both["classification"] == "UNEXPLAINED").sum()),
+                        "truth_unexplained": int((both["expected_final_status"] == "UNEXPLAINED").sum()),
+                        "pipeline_open_resolution": int((both["resolution"] == "OPEN").sum()),
+                        "pipeline_blocked_resolution": int((both["resolution"] == "BLOCKED").sum())},
+    }
+    per = {}
+    for c in sorted(set(both["expected_final_status"]) | set(both["classification"])):
+        per[c] = _pr(int(((both["expected_final_status"] == c) & (both["classification"] == c)).sum()),
+                     int(((both["expected_final_status"] != c) & (both["classification"] == c)).sum()),
+                     int(((both["expected_final_status"] == c) & (both["classification"] != c)).sum()))
+    out["per_classification"] = per
+    conf = (both[~cls_ok].groupby(["expected_final_status", "classification"]).size().reset_index(name="n")
+            .sort_values("n", ascending=False))
+    out["misclassified"] = conf.to_dict("records")
+
+    # amount agreement on chains whose gateway record is visible (a quarantined record has no verified gateway amount)
+    visible = both[both["flow_type_t"].isin(["PAYMENT", "REFUND"]) & both["flow_type_p"].isin(["PAYMENT", "REFUND"])]
+    fields = {"customer_amount": ("expected_customer_amount", "order_amount"),
+              "gateway_amount": ("expected_gateway_amount", "gateway_gross"),
+              "expected_fee": ("expected_fee_t", "expected_fee_p"),
+              "expected_net": ("expected_net_settlement", "expected_net"),
+              "bank_settlement": ("expected_bank_settlement", "bank_net")}
+    checks = {}
+    for name, (tc, pc) in fields.items():
+        a, b = visible[tc].astype(float), visible[pc].astype(float)
+        agree = (a.isna() & b.isna()) | ((a - b).abs() <= MONEY_TOL)
+        checks[name] = {"compared": int(len(visible)), "differ": int((~agree).sum())}
+    out["field_agreement"] = checks
+
+    te, pe = both["expected_exposure"].fillna(0.0), both["exposure_amount"].fillna(0.0)
+    tot_t = float(truth["expected_exposure"].fillna(0).sum())
+    diff = float((te - pe).abs().sum() + only_truth["expected_exposure"].fillna(0).sum()
+                 + only_pipeline["exposure_amount"].fillna(0).sum())
+    out["money"] = {"truth_exposure": round(tot_t, 2), "pipeline_exposure": round(float(got["exposure_amount"].fillna(0).sum()), 2),
+                    "absolute_difference": round(diff, 2),
+                    "difference_pct_of_truth": round(100 * diff / tot_t, 4) if tot_t else None,
+                    "truth_exposure_by_resolution": truth.groupby("expected_resolution")["expected_exposure"].sum().round(2).to_dict(),
+                    "pipeline_exposure_by_resolution": got.groupby("resolution")["exposure_amount"].sum().round(2).to_dict()}
+    cols = ["flow_id", "expected_final_status", "classification", "expected_breakpoint", "first_breakpoint",
+            "expected_exposure", "exposure_amount"]
+    out["worst_misses"] = (both[~(cls_ok & bp_ok)].assign(_gap=(te - pe).abs()).sort_values("_gap", ascending=False)
+                           .head(10)[cols].to_dict("records"))
+    return out
 
 
 def print_report(r: dict) -> None:
@@ -155,6 +233,23 @@ def print_report(r: dict) -> None:
     line("settlements of quarantined txns", r["source_quarantined_settlements"])
     print(f"  order without payment: {r['order_without_payment']}")
     print(f"  payment without order: {r['no_order_payments']}")
-    print("\nMONEY AT RISK (INR)")
+    print("\nMONEY AT RISK, engine view (INR, gross basis)")
     for m in r["money_at_risk_by_status"]:
         print(f"  {m['status']:<22} items={m['items']:<6} {m['money']:>14,.2f}")
+    mf = r.get("money_flow")
+    if mf:
+        print("\nMONEY FLOW (chain by chain against the injected financial truth)")
+        print(f"  chains {mf['chains']}")
+        print(f"  classification accuracy={mf['classification_accuracy']}  breakpoint accuracy={mf['breakpoint_accuracy']}  "
+              f"resolution accuracy={mf['resolution_accuracy']}")
+        line("discrepancy detection", mf["discrepancy_detection"])
+        print(f"  root cause: {mf['root_cause']}")
+        print(f"  unexplained: {mf['unexplained']}")
+        for c, d in mf["per_classification"].items():
+            line(c, d)
+        print(f"  field agreement, chains that differ: {dict((k, v['differ']) for k, v in mf['field_agreement'].items())}")
+        print(f"  money: {mf['money']}")
+        if mf["misclassified"]:
+            print("  misclassified (truth -> pipeline):")
+            for x in mf["misclassified"][:12]:
+                print(f"    {x['expected_final_status']:<26} -> {x['classification']:<26} n={x['n']}")

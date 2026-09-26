@@ -406,7 +406,7 @@ def main() -> int:
     ap.add_argument("--dbt-max-scale", type=int, default=10)
     ap.add_argument("--full-max-scale", type=int, default=25)
     ap.add_argument("--layouts", default="baseline,partitioned", help="baseline,partitioned or baseline")
-    ap.add_argument("--out", default=str(ROOT / "docs" / f"results_partitioning_benchmark_{date.today().isoformat()}.json"))
+    ap.add_argument("--out", default=str(ROOT / "data" / "benchmarks" / f"results_partitioning_benchmark_{date.today().isoformat()}.json"))
     args = ap.parse_args()
 
     import dbt.version
@@ -441,6 +441,7 @@ def main() -> int:
             print(f"[{s}x] FAILED: {exc}", flush=True)
         finally:
             shutil.rmtree(work, ignore_errors=True)
+        Path(args.out).parent.mkdir(parents=True, exist_ok=True)
         Path(args.out).write_text(json.dumps({**header, "results": results}, indent=2, default=str), encoding="utf-8")
     print(f"wrote {args.out}")
     return 0

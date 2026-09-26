@@ -1,7 +1,7 @@
 """Summarise per-stage wall-clock time, peak memory and row counts of real pipeline runs (from ops.task_log).
 
 Also measures the dashboard's first render (time and peak RSS) with Streamlit's AppTest.
-Writes docs/results_stage_resources_<label>.json.  Read-only with respect to the warehouse.
+Writes data/benchmarks/results_stage_resources_<label>.json.  Read-only with respect to the warehouse.
 
 Usage:  python scripts/report_stage_resources.py --label 30day_backfill [--no-dashboard]
 """
@@ -79,7 +79,8 @@ def main() -> int:
         out["dashboard"] = (f"first render {first:.1f} s, cached re-render {second:.1f} s, peak RSS "
                             f"{round(pm.peak_mb) if pm.peak_mb else 'n/a'} MB (in-process AppTest; a real browser session adds the "
                             "browser's own memory, which is NOT MEASURED)")
-    path = ROOT / "docs" / f"results_stage_resources_{args.label}.json"
+    path = ROOT / "data" / "benchmarks" / f"results_stage_resources_{args.label}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(out, indent=2), encoding="utf-8")
     print(json.dumps(out, indent=2))
     return 0

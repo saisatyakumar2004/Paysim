@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import shutil
 import sqlite3
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -24,6 +25,7 @@ import numpy as np
 import pandas as pd
 
 from . import config
+from .truth import build_flow_truth
 
 CATEGORIES = ["grocery", "electronics", "fashion", "travel", "food", "gaming", "pharmacy", "services"]
 CITIES = ["Hyderabad", "Bengaluru", "Pune", "Chennai", "Delhi", "Mumbai", "Kolkata", "Ahmedabad"]
@@ -48,6 +50,10 @@ QUARANTINE_DEFECTS = {
 }
 # settlement outcome probabilities for observed captured transactions
 SETTLE_OUTCOMES = [("missing", 0.015), ("mismatch", 0.015), ("rounding", 0.020), ("corrupt_ref", 0.010)]
+# Financial scenarios layered on clean settlements. They use their OWN random stream (seed, 7), so switching them on or off
+# never changes any other draw of the generator.
+FIN_OUTCOMES = [("fee_deviation", 0.004), ("late", 0.004), ("dup_settlement", 0.003), ("split", 0.003)]
+AGGREGATE_PAIR_RATE = 0.01      # per (merchant, settlement day) group that has two clean payments
 
 
 @dataclass
@@ -59,6 +65,7 @@ class GenConfig:
     n_merchants: int = 200
     seed: int = 42
     bad_rate: float = 1.0          # multiplier on every defect probability (0 = clean data)
+    financial_defects: float = 1.0  # multiplier on the fee / timing / duplicate / split / aggregated settlement scenarios
     page_size: int = 500
 
 
@@ -121,11 +128,15 @@ def generate(cfg: GenConfig) -> dict:
     weights /= weights.sum()
     merchant_ids = snapshots[0]["merchant_id"].to_numpy()
 
+    snapshot_days = sorted(snapshots)
+    fee_of = {(k, str(m_)): float(f_) for k, snap in snapshots.items()
+              for m_, f_ in zip(snap["merchant_id"], snap["fee_pct"], strict=True)}
+
     def fee_pct_for(mid: str, d: int) -> float:
-        snap = snapshots[max(k for k in snapshots if k <= d)]
-        return float(snap.loc[snap["merchant_id"] == mid, "fee_pct"].iloc[0])
+        return fee_of[(max(k for k in snapshot_days if k <= d), mid)]
 
     dq_truth: list[dict] = []
+    bad_fee_rows: set[tuple[str, int]] = set()      # (merchant, snapshot day) whose fee row was corrupted and quarantined
     (src / "merchants").mkdir()
     for k, snap in snapshots.items():
         df = snap.copy()
@@ -139,6 +150,7 @@ def generate(cfg: GenConfig) -> dict:
             df.loc[j, "fee_pct"] = 25.0
             dq_truth.append({"dataset": "merchants", "key": df.loc[j, "merchant_id"], "defect": "bad_fee",
                              "action": "quarantine"})
+            bad_fee_rows.add((str(df.loc[j, "merchant_id"]), k))
         df.to_csv(src / "merchants" / f"merchants_{(cfg.start + timedelta(days=k)).isoformat()}.csv", index=False)
 
     # ---- anomaly plan (merchant-day level fraud patterns) -----------------------------------
@@ -187,20 +199,24 @@ def generate(cfg: GenConfig) -> dict:
 
         order_row = {"order_id": oid, "merchant_id": merchant, "customer_id": cust, "order_amount": order_amount,
                      "order_status": status, "created_at": created, "updated_at": created}
+        order_state = "ABSENT" if orphan_payment else "VISIBLE"     # what the pipeline can see of this order
         if not orphan_payment:
             row = dict(order_row)
             r = rng.random()
             if r < 0.003 * bad:
                 row["order_amount"] = -abs(row["order_amount"])
                 dq_truth.append({"dataset": "orders", "key": oid, "defect": "negative_amount", "action": "quarantine"})
+                order_state = "QUARANTINED"
             elif r < 0.006 * bad:
                 row["order_status"] = "delivred"
                 dq_truth.append({"dataset": "orders", "key": oid, "defect": "bad_status", "action": "quarantine"})
+                order_state = "QUARANTINED"
             order_rows.append(row)
         else:
             truth_orders.append({"order_id": oid, "issue": "NO_ORDER"})   # payment exists, order does not
         if no_payment:
-            truth_orders.append({"order_id": oid, "issue": "ORDER_WITHOUT_PAYMENT"})
+            truth_orders.append({"order_id": oid, "issue": "ORDER_WITHOUT_PAYMENT", "order_amount": order_amount,
+                                 "merchant_id": merchant, "created_at": created, "order_state": order_state})
             return
         if amt_diff:
             truth_orders.append({"order_id": oid, "issue": "AMOUNT_DIFF"})
@@ -208,7 +224,8 @@ def generate(cfg: GenConfig) -> dict:
         method = str(rng.choice(METHODS, p=METHOD_P))
         base = dict(order_id=oid, merchant_id=merchant, amount=amt, currency="INR", method=method,
                     txn_type="payment", refund_of=None, day=created.date(), created_at=created,
-                    defect=None, outcome=None, is_dup_charge=False, orphan_refund=False)
+                    defect=None, outcome=None, is_dup_charge=False, orphan_refund=False,
+                    order_amount=order_amount, order_state=order_state, dup_of=None, fin="")
         if failed:
             txns.append({**base, "txn_id": new_txn_id(), "status": "failed"})
             return
@@ -216,7 +233,7 @@ def generate(cfg: GenConfig) -> dict:
         first["defect"] = _pick(rng, GATEWAY_DEFECTS, bad)
         txns.append(first)
         if rng.random() < 0.008 * bad:      # customer charged twice for the same order
-            dup = {**base, "txn_id": new_txn_id(), "status": "captured", "is_dup_charge": True,
+            dup = {**base, "txn_id": new_txn_id(), "status": "captured", "is_dup_charge": True, "dup_of": first["txn_id"],
                    "created_at": created + timedelta(seconds=int(rng.integers(30, 300)))}
             txns.append(dup)
         if rng.random() < 0.03:             # refund later
@@ -280,6 +297,8 @@ def generate(cfg: GenConfig) -> dict:
     stl_seq = 0
     for t in txns:
         t["settle_day"] = None
+        t["bank_rows"] = []
+        t["net_defect"] = False
         if t["status"] != "captured":
             continue
         d = (t["day"] - cfg.start).days
@@ -311,26 +330,116 @@ def generate(cfg: GenConfig) -> dict:
         ref = f"GW-{ref_id}" if rng.random() < 0.6 else ref_id.lower()
         stl_seq += 1
         sid = f"STL{stl_seq:09d}"
-        settle_rows.append({"settlement_id": sid, "gateway_ref": ref, "merchant_id": t["merchant_id"],
-                            "gross_amount": gross, "fee_amount": fee, "net_amount": net,
-                            "settlement_date": (cfg.start + timedelta(days=sd)).isoformat(), "_day": sd})
-        truth_settle.append({"settlement_id": sid, "txn_id": t["txn_id"], "kind": outcome,
+        row = {"settlement_id": sid, "gateway_ref": ref, "merchant_id": t["merchant_id"],
+               "gross_amount": gross, "fee_amount": fee, "net_amount": net,
+               "settlement_date": (cfg.start + timedelta(days=sd)).isoformat(), "_day": sd}
+        settle_rows.append(row)
+        t["bank_rows"].append(row)
+        t["net_defect"] = net_defect
+        truth_settle.append({"settlement_id": sid, "txn_id": t["txn_id"], "kind": outcome, "fin": "",
                              "expected_status": "SOURCE_QUARANTINED" if quarantined_defect else "LINKED"})
         if net_defect:
             dq_truth.append({"dataset": "settlements", "key": sid, "defect": "net_mismatch", "action": "flag"})
 
     n_orphans = int(0.004 * len(settle_rows) * bad)
+    orphan_rows: list[dict] = []
     for _ in range(n_orphans):
         sd = int(rng.integers(1, cfg.days))
         stl_seq += 1
         sid = f"STL{stl_seq:09d}"
         amt = round(float(np.clip(rng.lognormal(6.6, 0.9), 20, 80000)), 2)
         m = str(rng.choice(merchant_ids, p=weights))
-        settle_rows.append({"settlement_id": sid, "gateway_ref": f"GW-TXN{int(rng.integers(10**9, 10**10)):010d}",
-                            "merchant_id": m, "gross_amount": amt, "fee_amount": round(amt * 0.02, 2),
-                            "net_amount": round(amt * 0.98, 2),
-                            "settlement_date": (cfg.start + timedelta(days=sd)).isoformat(), "_day": sd})
+        orow = {"settlement_id": sid, "gateway_ref": f"GW-TXN{int(rng.integers(10**9, 10**10)):010d}",
+                "merchant_id": m, "gross_amount": amt, "fee_amount": round(amt * 0.02, 2),
+                "net_amount": round(amt * 0.98, 2),
+                "settlement_date": (cfg.start + timedelta(days=sd)).isoformat(), "_day": sd}
+        settle_rows.append(orow)
+        orphan_rows.append(orow)
         truth_settle.append({"settlement_id": sid, "txn_id": None, "kind": "orphan", "expected_status": "ORPHAN_SETTLEMENT"})
+
+
+    # ---- financial scenarios on top of clean settlements (own random stream; see FIN_OUTCOMES) -------------------
+    fin_scale = cfg.financial_defects * bad
+    base_counts = Counter(r["_day"] for r in settle_rows)     # BEFORE injection: keeps the bank re-send draw below unchanged
+    truth_by_sid = {r["settlement_id"]: r for r in truth_settle}
+    if fin_scale > 0:
+        fin_rng = np.random.default_rng([cfg.seed, 7])
+
+        def new_row(src_row: dict, t: dict, day: int, **over) -> dict:
+            nonlocal stl_seq
+            stl_seq += 1
+            row = {**src_row, "settlement_id": f"STL{stl_seq:09d}", "_day": day,
+                   "settlement_date": (cfg.start + timedelta(days=day)).isoformat(), **over}
+            settle_rows.append(row)
+            t["bank_rows"].append(row)
+            truth_settle.append({"settlement_id": row["settlement_id"], "txn_id": t["txn_id"], "kind": t["outcome"],
+                                 "fin": t["fin"], "expected_status": "LINKED"})
+            return row
+
+        for t in txns:
+            rows_ = t["bank_rows"]
+            if (len(rows_) != 1 or t["txn_type"] != "payment" or t["defect"] in QUARANTINE_DEFECTS
+                    or t["outcome"] not in ("ok", "rounding") or t["net_defect"]):
+                continue
+            kind = _pick(fin_rng, FIN_OUTCOMES, fin_scale)
+            if kind is None:
+                continue
+            row = rows_[0]
+            d = (t["day"] - cfg.start).days
+            pct = fee_pct_for(t["merchant_id"], d)
+            if kind == "fee_deviation":
+                dev = max(1.5, row["gross_amount"] * float(fin_rng.uniform(0.4, 1.2)) / 100)
+                sign = 1 if fin_rng.random() < 0.5 or row["fee_amount"] < dev else -1
+                row["fee_amount"] = round(row["fee_amount"] + sign * dev, 2)
+                row["net_amount"] = round(row["gross_amount"] - row["fee_amount"], 2)
+            elif kind == "late":
+                new_day = d + sla_days + int(fin_rng.integers(1, 4))
+                if new_day > last_day:
+                    continue
+                row["_day"] = new_day
+                row["settlement_date"] = (cfg.start + timedelta(days=new_day)).isoformat()
+                t["settle_day"] = new_day
+            elif kind == "dup_settlement":
+                day2 = row["_day"] + int(fin_rng.integers(0, 2))
+                t["fin"] = kind
+                new_row(row, t, min(day2, last_day))
+            elif kind == "split":
+                share = float(fin_rng.uniform(0.3, 0.7))
+                g1 = round(row["gross_amount"] * share, 2)
+                g2 = round(row["gross_amount"] - g1, 2)
+                f1 = round(g1 * pct / 100, 2)
+                f2 = round(row["fee_amount"] - f1, 2)
+                day2 = min(row["_day"] + int(fin_rng.integers(0, 2)), last_day)
+                t["fin"] = kind
+                new_row(row, t, day2, gross_amount=g2, fee_amount=f2, net_amount=round(g2 - f2, 2))
+                row.update(gross_amount=g1, fee_amount=f1, net_amount=round(g1 - f1, 2))
+            t["fin"] = kind
+            truth_by_sid[row["settlement_id"]]["fin"] = kind
+            for r_ in t["bank_rows"]:
+                if r_["settlement_id"] in truth_by_sid:
+                    truth_by_sid[r_["settlement_id"]]["fin"] = kind
+
+        # two clean payments of one merchant that the bank settled on the same day are paid as ONE record (no batch id)
+        groups: dict[tuple, list[dict]] = {}
+        for t in txns:
+            if (len(t["bank_rows"]) == 1 and t["txn_type"] == "payment" and t["outcome"] == "ok" and not t["fin"]
+                    and not t["net_defect"] and t["defect"] not in QUARANTINE_DEFECTS and not t["is_dup_charge"]):
+                groups.setdefault((t["merchant_id"], t["bank_rows"][0]["_day"]), []).append(t)
+        for key in sorted(groups):
+            g = sorted(groups[key], key=lambda t: t["txn_id"])
+            if len(g) < 2 or fin_rng.random() >= AGGREGATE_PAIR_RATE * fin_scale:
+                continue
+            t1, t2 = g[0], g[1]
+            r1, r2 = t1["bank_rows"][0], t2["bank_rows"][0]
+            r1.update(gross_amount=round(r1["gross_amount"] + r2["gross_amount"], 2),
+                      fee_amount=round(r1["fee_amount"] + r2["fee_amount"], 2),
+                      net_amount=round(r1["net_amount"] + r2["net_amount"], 2))
+            settle_rows.remove(r2)
+            truth_settle[:] = [x for x in truth_settle if x["settlement_id"] != r2["settlement_id"]]
+            t2["bank_rows"] = []
+            t1["fin"], t2["fin"] = "aggregated_over", "aggregated_missing"
+            t1["agg_partner"], t2["agg_partner"] = t2["txn_id"], t1["txn_id"]
+            truth_by_sid[r1["settlement_id"]]["fin"] = "aggregated_over"
 
     # ---- write settlements ------------------------------------------------------------------
     (src / "settlements").mkdir()
@@ -340,7 +449,7 @@ def generate(cfg: GenConfig) -> dict:
         part = sdf[sdf["_day"] == d][cols].copy() if len(sdf) else pd.DataFrame(columns=cols)
         if part.empty:
             continue
-        if bad > 0 and rng.random() < 0.005 * len(part) / 10:   # bank re-sends a row
+        if bad > 0 and rng.random() < 0.005 * base_counts[d] / 10:   # bank re-sends a row
             dupe = part.sample(1, random_state=int(rng.integers(1_000_000)))
             part = pd.concat([part, dupe], ignore_index=True)
             dq_truth.append({"dataset": "settlements", "key": dupe["settlement_id"].iloc[0], "defect": "dup_row",
@@ -421,7 +530,6 @@ def generate(cfg: GenConfig) -> dict:
 
     # ---- truth tables -------------------------------------------------------------------------
     as_of = last_day
-    settled_ok = {s["txn_id"]: s for s in truth_settle if s["txn_id"]}
     truth_rows = []
     quarantined_keys = {r["key"] for r in dq_truth if r["dataset"] == "gateway" and r["action"] == "quarantine"
                         and r["defect"] != "dup_webhook"}
@@ -434,9 +542,9 @@ def generate(cfg: GenConfig) -> dict:
             status = "QUARANTINED"
         elif t["orphan_refund"]:
             status = "ORPHAN_REFUND"
-        elif t["txn_id"] in settled_ok:
-            kind = settled_ok[t["txn_id"]]["kind"]
-            status = "AMOUNT_MISMATCH" if kind == "mismatch" else "MATCHED"
+        elif t["bank_rows"]:
+            status = ("AMOUNT_MISMATCH" if t["outcome"] == "mismatch" or t["fin"] in ("dup_settlement", "aggregated_over")
+                      else "MATCHED")
         else:
             status = "MISSING_SETTLEMENT" if d + sla_days < as_of else "PENDING"
         truth_rows.append({"txn_id": t["txn_id"], "txn_type": t["txn_type"], "merchant_id": t["merchant_id"],
@@ -444,7 +552,31 @@ def generate(cfg: GenConfig) -> dict:
                            "expected_status": status, "is_duplicate_charge": t["txn_id"] in dup_charge_ids,
                            "expected_fuzzy": bool(t["outcome"] == "corrupt_ref" and status == "MATCHED")})
     pd.DataFrame(truth_rows).to_parquet(truth / "txn.parquet", index=False)
-    pd.DataFrame(truth_settle).to_parquet(truth / "settlement.parquet", index=False)
+    by_sid = {r["settlement_id"]: r for r in settle_rows}
+    pd.DataFrame([{**x, "gross_amount": by_sid[x["settlement_id"]]["gross_amount"],
+                   "fee_amount": by_sid[x["settlement_id"]]["fee_amount"],
+                   "net_amount": by_sid[x["settlement_id"]]["net_amount"],
+                   "settlement_date": by_sid[x["settlement_id"]]["settlement_date"]} for x in truth_settle]
+                 ).to_parquet(truth / "settlement.parquet", index=False)
+    bad_fee_since = {}
+    for m_, k_ in sorted(bad_fee_rows, key=lambda x: x[1], reverse=True):
+        bad_fee_since[m_] = cfg.start + timedelta(days=k_)          # earliest snapshot wins
+    fee_cfg = {**config.settings()["reconciliation"], **config.settings()["money_flow"]}
+
+    def fee_visible(mid: str, d: int) -> float:
+        """The fee the merchant master shows the pipeline on day d: the latest snapshot whose row was not quarantined."""
+        for k in sorted((k for k in snapshot_days if k <= d), reverse=True):
+            if (mid, k) not in bad_fee_rows:
+                return fee_of[(k, mid)]
+        return fee_pct_for(mid, d)
+
+    flow_truth = build_flow_truth(
+        txns, [o for o in truth_orders if o.get("issue") == "ORDER_WITHOUT_PAYMENT"],
+        [{"settlement_id": r["settlement_id"], "merchant_id": r["merchant_id"], "gross": r["gross_amount"],
+          "fee": r["fee_amount"], "net": r["net_amount"]} for r in orphan_rows],
+        start=cfg.start, last_day=last_day, quarantine_defects=QUARANTINE_DEFECTS, fee_true=fee_pct_for,
+        fee_visible=fee_visible, bad_fee_since=bad_fee_since, cfg=fee_cfg)
+    flow_truth.to_parquet(truth / "money_flow.parquet", index=False)
     pd.DataFrame(truth_orders or [{"order_id": "", "issue": ""}]).to_parquet(truth / "orders.parquet", index=False)
     pd.DataFrame(dq_truth or [{"dataset": "", "key": "", "defect": "", "action": ""}]).to_parquet(
         truth / "dq.parquet", index=False)
@@ -457,6 +589,7 @@ def generate(cfg: GenConfig) -> dict:
         "settlements": len(settle_rows), "seed": cfg.seed, "bad_rate": bad,
         "injected": pd.DataFrame(dq_truth)["defect"].value_counts().to_dict() if dq_truth else {},
         "anomalies": len(anomalies),
+        "financial_scenarios": dict(Counter(t["fin"] for t in txns if t["fin"])),
     }
     (truth / "summary.json").write_text(json.dumps(summary, indent=2, default=str), encoding="utf-8")
     return summary

@@ -1,8 +1,8 @@
 """PayReconcile dashboards.
 
 Run:  streamlit run dashboard/app.py
-Eight pages, each with its own URL (/ = overview, /reconciliation, /exceptions, /data-quality, /settlement, /merchant-risk,
-/anomalies, /pipeline). Reads the warehouse read-only; nothing here can modify data.
+Nine pages, each with its own URL (/ = money-flow, /overview, /reconciliation, /exceptions, /data-quality, /settlement,
+/merchant-risk, /anomalies, /pipeline). Reads the warehouse read-only; nothing here can modify data.
 """
 
 from __future__ import annotations
@@ -21,6 +21,7 @@ from views import (  # noqa: E402
     exceptions,
     executive,
     merchant_risk,
+    money_flow,
     pipeline_health,
     reconciliation,
     settlement,
@@ -29,7 +30,8 @@ from views import (  # noqa: E402
 st.set_page_config(page_title="PayReconcile", layout="wide")
 
 PAGES = [
-    ("Executive Overview", "overview", executive.render, True),
+    ("Money Flow", "money-flow", money_flow.render, True),
+    ("Executive Overview", "overview", executive.render, False),
     ("Reconciliation", "reconciliation", reconciliation.render, False),
     ("Exceptions Queue", "exceptions", exceptions.render, False),
     ("Data Quality", "data-quality", data_quality.render, False),

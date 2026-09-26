@@ -1,10 +1,16 @@
-# Central tunables. Every threshold here is documented in docs/dq_rules.md.
+# Central tunables. Every threshold is described in README.md (reconciliation, money flow) or contracts/*.yml (data quality).
 
 reconciliation:
   amount_tolerance: 1.00        # INR; |settled - expected| <= this is MATCHED (rounding)
   settlement_sla_days: 3        # a captured txn unsettled after this many days is MISSING_SETTLEMENT
   fuzzy_max_edit_distance: 2    # max Levenshtein distance between gateway txn_id and bank reference
   duplicate_charge_window_minutes: 10
+
+money_flow:
+  fee_tolerance: 0.05           # INR; fee / net-arithmetic differences up to this are rounding, not a finding
+  refund_fee_pct: 0.0           # refunds carry no fee in the bank file format (documented assumption)
+  candidate_window_days: 14     # an unlinked bank record this many days after capture is still checked as a candidate
+  aggregation_max_members: 3    # largest group of unsettled payments tested against one bank amount
 
 quality:
   severity_weights: {CRITICAL: 5, ERROR: 3, WARN: 1}

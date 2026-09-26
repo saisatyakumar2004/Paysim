@@ -2,7 +2,7 @@
 
 Reports, per page size: time to fetch one full day over HTTP, the same day from files, and the record count check; plus the
 observed behaviour under injected faults (503s with backoff, slow responses vs the client timeout).
-Writes docs/results_api_<date>.json.  Requires source data (python -m payreconcile generate) and the [api] extra.
+Writes data/benchmarks/results_api_<date>.json.  Requires source data (python -m payreconcile generate) and the [api] extra.
 """
 
 from __future__ import annotations
@@ -105,7 +105,8 @@ def main() -> int:
     server.should_exit = True
     thread.join(timeout=5)
 
-    path = ROOT / "docs" / f"results_api_{date.today().isoformat()}.json"
+    path = ROOT / "data" / "benchmarks" / f"results_api_{date.today().isoformat()}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(out, indent=2), encoding="utf-8")
     print(json.dumps(out, indent=2))
     return 0

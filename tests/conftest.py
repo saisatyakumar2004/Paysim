@@ -7,11 +7,17 @@ from payreconcile import config, db
 
 
 @pytest.fixture()
-def data_dir(tmp_path, monkeypatch):
-    """Redirect every data path (source, bronze, warehouse, truth) to a temp directory."""
-    monkeypatch.setenv("PAYRECON_DATA", str(tmp_path))
+def data_dir(tmp_path):
+    """Redirect every data path (source, bronze, warehouse, truth) to a temp directory.
+
+    Uses its own MonkeyPatch: a test that calls `monkeypatch.undo()` to restore a patched function must not also drop
+    this redirect, or the rest of the test would silently read and write the real project warehouse.
+    """
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv("PAYRECON_DATA", str(tmp_path))
+        config.settings.cache_clear()
+        yield tmp_path
     config.settings.cache_clear()
-    return tmp_path
 
 
 @pytest.fixture()

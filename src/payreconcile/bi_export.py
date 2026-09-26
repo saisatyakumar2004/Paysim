@@ -2,10 +2,17 @@
 
     python -m payreconcile export-bi --out exports/powerbi
 
-Tables (see docs/powerbi.md for the model, relationships and DAX measures):
-  dim_date, dim_merchant (SCD2), dim_payment_method, dim_status,
+Tables:
+  dim_date, dim_merchant (SCD2), dim_payment_method, dim_status, dim_stage, dim_resolution,
   fact_transactions, fact_settlements, fact_reconciliation, fact_reconciliation_audit,
+  fact_money_flow (one row per money chain: every stage amount, the signed gap at each step, first breakpoint, root cause,
+  resolution, evidence level, exposure), money_flow_bridge (the same gaps, one row per chain and step, for waterfall visuals),
+  money_flow_evidence (the underlying records behind every non-reconciled conclusion),
   kpi_daily, dq_scores, pipeline_runs
+
+Relationships: every fact joins dim_merchant on merchant_sk and dim_date on date_key; fact_money_flow.first_breakpoint joins
+dim_stage.stage and fact_money_flow.resolution joins dim_resolution.resolution; money_flow_bridge and money_flow_evidence join
+fact_money_flow on flow_id.
 
 The export reads Silver, the reconciliation state and ops tables directly, so it does not depend on the dbt marts. It does NOT
 create a .pbix file: building the report itself must be done in Power BI Desktop.
@@ -48,6 +55,52 @@ QUERIES: dict[str, str] = {
     "dim_merchant": """
         SELECT md5(merchant_id || '|' || cast(valid_from AS VARCHAR)) AS merchant_sk, merchant_id, name, category, city,
                risk_tier, fee_pct, valid_from, valid_to, is_current FROM silver.merchants_scd2""",
+    "dim_stage": """
+        SELECT * FROM (VALUES
+            ('NONE', 0, 'No breakpoint: the chain reconciles'),
+            ('ORDER', 1, 'Customer / order side'),
+            ('GATEWAY', 2, 'Payment gateway capture'),
+            ('PROCESSING', 3, 'Fees and deductions between capture and settlement'),
+            ('BANK_SETTLEMENT', 4, 'Bank settlement'),
+            ('MERCHANT_SETTLEMENT', 5, 'Merchant received (no amount exists in the source data)'),
+            ('SOURCE_DATA_QUALITY', 6, 'A record needed for the conclusion is quarantined or its batch was not loaded'),
+            ('MATCHING', 7, 'A candidate record exists but cannot be confirmed'))
+        AS t(stage, sort_order, description)""",
+    "dim_resolution": """
+        SELECT * FROM (VALUES
+            ('RECONCILED', 0, false, 'Money agrees within tolerance'),
+            ('IN_FLIGHT', 1, false, 'Not yet due'),
+            ('TIMING', 2, false, 'Right money, wrong date'),
+            ('EXPLAINED', 3, true, 'A mechanism in the data accounts for the whole gap'),
+            ('BLOCKED', 4, true, 'Cannot be decided from the data'),
+            ('OPEN', 5, true, 'Confirmed gap at a known stage with no documented cause (unexplained)'))
+        AS t(resolution, sort_order, is_finding, description)""",
+    "fact_money_flow": """
+        SELECT f.flow_id, f.flow_type, f.order_id, f.txn_id, f.merchant_id, m.merchant_sk, f.event_date AS date_key,
+               g.method AS method_key, m.risk_tier, f.settlement_ids, f.bank_reference, f.match_method, f.recon_status,
+               f.settlement_date, f.settlement_lag_days, f.n_settlements, f.settlement_pattern, f.order_state,
+               f.order_amount, f.expected_gateway, f.gateway_gross, f.fee_pct, f.expected_fee, f.expected_net,
+               f.bank_gross, f.bank_fee, f.bank_net, f.merchant_amount, f.merchant_stage,
+               f.gap_gateway, f.gap_bank_amount, f.gap_fee, f.gap_bank_net, f.difference_amount,
+               f.classification, f.first_breakpoint, f.root_cause, f.resolution, f.evidence_level, f.findings,
+               f.exposure_amount, f.tolerated_amount, f.counted_in, f.evidence_summary,
+               f.resolution IN ('OPEN', 'BLOCKED', 'EXPLAINED') AS is_finding, f.resolution = 'OPEN' AS is_unexplained,
+               date_diff('day', f.event_date, f.as_of_date) AS age_days, f.as_of_date
+        FROM gold.fact_money_flow f
+        LEFT JOIN silver.gateway_txns g ON g.txn_id = f.txn_id
+        LEFT JOIN dim_merchant_x m ON m.merchant_id = f.merchant_id AND f.event_date >= m.valid_from AND f.event_date < m.valid_to""",
+    "money_flow_bridge": """
+        SELECT flow_id, step_order, step, stage, amount, classification, first_breakpoint, resolution, merchant_id FROM (
+            SELECT flow_id, 1 AS step_order, 'GATEWAY_VS_ORDER' AS step, 'GATEWAY' AS stage, gap_gateway AS amount,
+                   classification, first_breakpoint, resolution, merchant_id FROM gold.fact_money_flow
+            UNION ALL SELECT flow_id, 2, 'BANK_GROSS_VS_CAPTURED', 'BANK_SETTLEMENT', gap_bank_amount, classification,
+                   first_breakpoint, resolution, merchant_id FROM gold.fact_money_flow
+            UNION ALL SELECT flow_id, 3, 'FEE_VS_SCHEDULE', 'PROCESSING', gap_fee, classification, first_breakpoint,
+                   resolution, merchant_id FROM gold.fact_money_flow
+            UNION ALL SELECT flow_id, 4, 'BANK_NET_VS_GROSS_MINUS_FEE', 'BANK_SETTLEMENT', gap_bank_net, classification,
+                   first_breakpoint, resolution, merchant_id FROM gold.fact_money_flow)
+        WHERE amount <> 0""",
+    "money_flow_evidence": "SELECT flow_id, evidence_type, record_ref, detail, amount FROM gold.money_flow_evidence",
     "dim_payment_method": """
         SELECT * FROM (VALUES ('upi', 'UPI'), ('card', 'Card'), ('netbanking', 'Net banking'), ('wallet', 'Wallet'))
         AS t(method_key, method_name)""",
@@ -115,7 +168,7 @@ def export(out: Path, formats: tuple[str, ...] = ("csv", "parquet")) -> dict:
         exc = ", ".join(f"'{s}'" for s in EXCEPTION_STATUSES)
         manifest: dict = {"generated_at": datetime.now().isoformat(timespec="seconds"), "as_of_date": str(state[0]),
                           "warehouse": str(config.warehouse_path()), "tables": {},
-                          "note": "Synthetic data. Power BI report (.pbix) is NOT included; see docs/powerbi.md."}
+                          "note": "Synthetic data. Power BI report (.pbix) is NOT included; see README.md."}
         sql_map = dict(QUERIES)
         sql_map["dim_status"] = ("SELECT * FROM (VALUES " + ", ".join(
             f"('{s}', '{c}', '{d}', {str(e).lower()}, {str(o).lower()}, {n})" for s, c, d, e, o, n in STATUS_DIM)

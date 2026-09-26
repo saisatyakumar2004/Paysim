@@ -9,7 +9,7 @@ from common import SYNTHETIC_NOTE, guard, q
 def render() -> None:
     guard()
     st.title("Data quality")
-    st.caption(f"Contracts and rules live in `contracts/*.yml` (catalogue: docs/dq_rules.md). {SYNTHETIC_NOTE}")
+    st.caption(f"Contracts and rules live in `contracts/*.yml` (the rule catalogue). {SYNTHETIC_NOTE}")
     latest_ids = "(SELECT arg_max(run_id, started_at) FROM ops.run_log GROUP BY run_date)"
     scores = q(f"SELECT run_date, dataset, score, status, rows_in, rows_quarantined FROM ops.dq_scores "
                f"WHERE run_id IN {latest_ids} ORDER BY run_date")

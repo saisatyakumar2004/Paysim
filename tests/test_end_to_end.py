@@ -184,6 +184,7 @@ def test_dashboard_renders_against_the_real_warehouse(platform):
     at = AppTest.from_file(str(config.ROOT / "dashboard" / "app.py"), default_timeout=120).run()
     assert not at.exception, [str(e.value)[:300] for e in at.exception]
     assert not at.error
-    assert at.title[0].value == "Executive overview"                       # the default page of the 8-page navigation
+    assert at.title[0].value == "Money flow"                               # the default page of the 9-page navigation
     assert any(m.label == "Money at risk" for m in at.metric)
-    assert any(m.label == "Match rate" for m in at.metric)
+    assert any(m.label == "Unexplained" for m in at.metric)
+    assert any("was expected from customers" in i.value for i in at.info)

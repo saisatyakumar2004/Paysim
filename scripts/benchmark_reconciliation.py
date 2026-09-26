@@ -34,7 +34,7 @@ def main() -> int:
     ap.add_argument("--orders-per-day", type=int, default=3000)
     ap.add_argument("--checkpoints", default=None, help="comma separated day numbers (default: every 5th day)")
     ap.add_argument("--no-dbt-full", action="store_true", help="skip the (slow) dbt full-rebuild timing")
-    ap.add_argument("--out", default=str(ROOT / "docs"))
+    ap.add_argument("--out", default=str(ROOT / "data" / "benchmarks"))
     args = ap.parse_args()
 
     workdir = ROOT / "data" / f"bench_{args.days}d"
@@ -100,7 +100,7 @@ def main() -> int:
               "incremental_median_s": round(statistics.median(inc), 3), "incremental_max_s": max(inc),
               "checkpoints": cp, "equivalence": equivalence, "audit_rows": audit_rows, "per_day": rows}
     out = Path(args.out)
-    out.mkdir(exist_ok=True)
+    out.mkdir(parents=True, exist_ok=True)
     (out / f"results_reconciliation_benchmark_{args.days}d.json").write_text(json.dumps(result, indent=2, default=str),
                                                                              encoding="utf-8")
     lines = ["| day | state items | evaluated (incremental) | incremental | engine full | speedup | dbt full rebuild | speedup |",
